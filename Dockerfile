@@ -5,7 +5,6 @@ FROM node:10.6-alpine
 # apk add --no-cache libc6-compat
 
 ENV PORT 3000
-EXPOSE 3000 # replace this with your application's default port, if necessary
 
 WORKDIR /usr/src/app
 COPY . .
