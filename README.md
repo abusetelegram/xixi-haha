@@ -26,7 +26,7 @@ Telegram Bot: [@xixi_haha_bot](https://t.me/xixi_haha_bot)
 
 托管在AWS Lambda
 
-## 还有什么说的吗
+## 还有什么说的吗？
 
 这个版本没有太注重分句，主要是清理了一下内容。抓取脚本（XJB）参考在这里：
 
@@ -99,35 +99,14 @@ with open('xi-v2.json', 'w') as outfile:
 ```
 
 服务端
-```node
-// content of index.js
-const http = require('http')
-const port = 3000
 
-const json = require('./xi.json')
-
-const requestHandler = (request, response) => {
-  response.writeHead(200,{
-	  'access-control-allow-headers': 'Content-Type, Content-Length, Authorization, Accept, X-Requested-With',
-	  'access-control-allow-methods': 'POST, GET',
-	  'access-control-allow-origin': '*',
-	  'content-type': 'text/html; charset=utf-8',
-  })
-  response.end(json[Math.floor(Math.random() * json.length)])
-}
-
-const server = http.createServer(requestHandler)
-
-server.listen(port, (err) => {
-  if (err) {
-    return console.log('something bad happened', err)
-  }
-
-  console.log(`server is listening on ${port}`)
-})
-
-```
+见`index.js`和`Dockerfile`
 
 ## 没了？
 
-本来是想保留那些重复来重复去的玩意，但是抓的时候有些地方漏了，就直接全部去重干掉了。有兴趣的自己玩玩吧。
+（其实我是有Future Plan的，但是我太懒了……估计会在某个闲得无聊的夜晚做了）
+
+- 点赞，鼓掌👏
+- 配合**原声**音频（对的，有很多**亲自朗读**的）
+
+本来是想保留那些重复来重复去的（比如称呼，xxx好）玩意，可以显得很zz。但是抓的时候有些地方漏了，就直接全部去重干掉了。有兴趣的自己玩玩吧。
