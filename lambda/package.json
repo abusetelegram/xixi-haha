@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "telegraf": "^3.25.0",
+    "telegraf-ratelimit": "^2.0.0"
+  }
+}
