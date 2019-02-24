@@ -24,7 +24,7 @@ API上线了（使用方法可参考[这里](https://blog.lwl12.com/read/hitokot
 
 Telegram Bot: [@xixi_haha_bot](https://t.me/xixi_haha_bot)
 
-托管在AWS Lambda
+支持`inline mode`，托管在AWS Lambda
 
 ## 还有什么说的吗？
 
