@@ -19,6 +19,16 @@ const handler = (ctx) => {
     reply_to_message_id: ctx.message.message_id
   })
 }
+
+const inline_handler = (type, text) => {
+  return {
+            type: 'article',
+            id: Date.now() + Date().milliseconds + type,
+            title: type,
+            message_text: text
+   }
+}
+
 const lianRen = (ctx) => {
   if (randomBoolean()) {
     ctx.telegram.sendMessage(ctx.message.chat.id, '怎么？我可是要连任114514年的男人！', {
@@ -37,9 +47,16 @@ const xueXi = (ctx) => {
 bot.start((ctx) => ctx.reply('**习**语Bot，项目地址：https://github.com/neverbehave/xixi-haha'))
 bot.command('yiyan', handler)
 bot.command('yiyan@xixi_haha_bot', handler)
+bot.on('inline_query', function (msg) {
+    bot.answerInlineQuery(msg.id, [
+        inline_handler('就地演讲', random())
+    ])
+});
 // Easter EGG
 bot.hears(/连任/g, lianRen)
 bot.hears(/学习/g, xueXi)
+
+
 
 /* AWS Lambda handler function */
 exports.handler = (event, context, callback) => {
