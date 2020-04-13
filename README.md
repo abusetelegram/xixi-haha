@@ -20,7 +20,7 @@ http://jhsjk.people.cn
 
 嗯。
 
-API上线了（使用方法可参考[这里](https://blog.lwl12.com/read/hitokoto-api.html)）：https://xixi-haha.never.eu.org
+API上线了（使用方法可参考[这里](https://blog.lwl12.com/read/hitokoto-api.html)）：https://fission.never.eu.org/yiyan/xixi-haha
 
 Telegram Bot: [@xixi_haha_bot](https://t.me/xixi_haha_bot)
 
