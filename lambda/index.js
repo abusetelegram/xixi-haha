@@ -1,3 +1,9 @@
+if (!process.env.BOT_TOKEN) {
+  const path = require('path')
+  const envpath = path.resolve(__dirname, '.env')
+  require('dotenv').config({ path: envpath })
+}
+
 const Telegraf = require('telegraf')
 const rateLimit = require('telegraf-ratelimit')
 const json = require('./xi.json')
@@ -60,12 +66,4 @@ bot.on('inline_query', (ctx) => {
 bot.hears(/连任/g, lianRen)
 bot.hears(/学习/g, xueXi)
 
-/* AWS Lambda handler function */
-exports.handler = (event, context, callback) => {
-  const tmp = JSON.parse(event.body); // get data passed to us
-  bot.handleUpdate(tmp); // make Telegraf process that data
-  return callback(null, { // return something for webhook, so it doesn't try to send same stuff again
-    statusCode: 200,
-    body: '',
-  });
-};
+module.exports = bot
