@@ -20,87 +20,17 @@ http://jhsjk.people.cn
 
 嗯。
 
-API上线了（使用方法可参考[这里](https://blog.lwl12.com/read/hitokoto-api.html)）：https://fission.never.eu.org/yiyan/xixi-haha
-
 Telegram Bot: [@xixi_haha_bot](https://t.me/xixi_haha_bot)
 
 支持`inline mode`，托管在AWS Lambda
 
 ## 还有什么说的吗？
 
-这个版本没有太注重分句，主要是清理了一下内容。抓取脚本（XJB）参考在这里：
+这个版本没有太注重分句，主要是清理了一下内容。抓取脚本（XJB）参考在`parse/`
 
-```python3
-import json
-from bs4 import BeautifulSoup
-import requests
+## 服务端
 
-
-li = []
-sentences = []
-
-# Get ALL Articles
-for i in range(1, 16):
-    print(i)
-    result = requests.get(
-        "http://jhsjk.people.cn/result/{}?form=706&else=501".format(i))
-    soup = BeautifulSoup(result.content)
-    arr = soup.find_all('ul', class_="p1_2")[0].find_all('a')
-    for a in arr:
-        li.append('http://jhsjk.people.cn/' + a['href'])
-
-print('start fetching pages')
-for addr in li:
-    print(addr)
-    result = requests.get(addr)
-    soup = BeautifulSoup(result.content)
-    arr = soup.find_all(class_="d2txt_con")[0].find_all('p')
-
-    for i in arr:
-        sentences.append(i.text.strip())
-
-
-with open('xi.json', 'w') as outfile:
-    json.dump(sentences, outfile, indent=2, ensure_ascii=False)
-
-```
-
-清理：
-```python3
-import json
-
-with open('xi-v1.json') as f:
-    data = json.load(f)
-
-sentences = []
-
-# extend data
-# \r\r\n is replaced by hand
-# (（新)(.*）) for attr
-# (新华社记者)(.*摄)
-# for i in data:
-#     li = i.split('\n')
-#     for s in li:
-#         s = s.strip()
-#         if s is not "":
-#             if s.startswith('（新') is False and s.startswith('(') is False and s.startswith('（2') is False and s.startswith('《 ') is False and s.startswith('>') is False:
-#                 sentences.append(s)
-
-for s in data:
-    if s.startswith('（人') is False and s.startswith('(') is False and s.startswith('（2') is False and s.startswith('《 ') is False and s.startswith('(2') is False:
-        sentences.append(s)
-    else:
-        print(s)
-
-# a = list(set(sentences)) 
-
-with open('xi-v2.json', 'w') as outfile:
-    json.dump(sentences, outfile, indent=2, ensure_ascii=False)
-```
-
-服务端
-
-见`index.js`和`Dockerfile`
+见`web/`
 
 ## 没了？
 

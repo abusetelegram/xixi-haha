@@ -1,4 +1,3 @@
-
 const json = require('./xi.json')
 
 const rand = (json) => {

@@ -1,4 +1,8 @@
 {
+  "scripts": {
+    "start:webhook": "node webhook.js",
+    "copy-resource": "cp ../xi.json ."
+  },
   "dependencies": {
     "dotenv": "^8.2.0",
     "telegraf": "^3.25.0",
