@@ -22,13 +22,15 @@ http://jhsjk.people.cn
 
 Telegram Bot: [@xixi_haha_bot](https://t.me/xixi_haha_bot)
 
-支持`inline mode`，托管在AWS Lambda
+支持`inline mode`
 
 ## 还有什么说的吗？
 
 这个版本没有太注重分句，主要是清理了一下内容。抓取脚本（XJB）参考在`parse/`
 
-## 服务端
+成品是[result.tgz](./parse), 缩减版本成品是[result-min.json](./parse/result-min.json)
+
+## Web服务
 
 见`web/`
 

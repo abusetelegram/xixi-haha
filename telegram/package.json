@@ -1,7 +1,6 @@
 {
   "scripts": {
-    "start:webhook": "node webhook.js",
-    "copy-resource": "cp ../xi.json ."
+    "start:webhook": "node webhook.js"
   },
   "dependencies": {
     "dotenv": "^8.2.0",

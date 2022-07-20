@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@v2
       - 
         name: Copy Resource File
-        run: cp ./xi.json telegram/
+        run: cp ./parse/result-min.json telegram/xi.json
       -
         name: Build and push
         uses: docker/build-push-action@v3
