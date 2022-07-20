@@ -5,21 +5,14 @@ if (!process.env.BOT_TOKEN) {
 }
 
 const Telegraf = require('telegraf')
-const rateLimit = require('telegraf-ratelimit')
 const json = require('./xi.json')
-
-// Set limit to 1 message per 0.5 seconds
-const limitConfig = {
-  window: 500,
-  limit: 1,
-  onLimitExceeded: (ctx, next) => console.log('Rate limit exceeded')
-}
+const entries_num = Object.keys(json).length
 
 const bot = new Telegraf(process.env.BOT_TOKEN)
-const entries_num = Object.keys(json)
-const random = (json) => Math.floor(Math.random() * json.length)
+
+const random = (arr) => arr[Math.floor(Math.random() * arr.length)]
 const fart = () => {
-  const key = Math.floor(Math.random() * entries_num)
+  const key = Object.keys(json)[Math.floor(Math.random() * entries_num)]
   const art = json[key]
   const word_key = Math.floor(Math.random() * art.text.length)
   const word = art.text[word_key]
@@ -27,7 +20,9 @@ const fart = () => {
   return {
     text: `${word}
 
-::本条来自[${art.title}](http://jhsjk.people.cn/article/${key}), 作者${art.author}, ${art.editor}`,
+--本条来自[${art.title}](http://jhsjk.people.cn/article/${key})
+作者 ${art.author}
+${art.editor}`,
     key, 
     word_key
   }
@@ -49,7 +44,10 @@ const fart_inline_handler = () => {
     description: text.length <= 30 ? text.substring(0, 30) : text.substring(0, 30) + '...',
     id: `${key}-${word_key}`,
     title: "就地演讲",
-    message_text: text
+    input_message_content: {
+      message_text: text,
+      parse_mode: "markdown"
+    }
   }
 }
 

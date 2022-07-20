@@ -4,7 +4,6 @@
   },
   "dependencies": {
     "dotenv": "^8.2.0",
-    "telegraf": "^3.25.0",
-    "telegraf-ratelimit": "^2.0.0"
+    "telegraf": "^3.25.0"
   }
 }
