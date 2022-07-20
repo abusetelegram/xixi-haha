@@ -2,7 +2,7 @@
 
 因为某天一个朋友被学校要求在动态里面刷某种言论的时候，打开某网站后被傻逼到了
 
-**欢迎加入习语学习群**：[点击加入](https://t.me/joinchat/CMe2Rlc9vN3xQViQUVgXxg)
+**欢迎加入习语学习群**：[点击加入](https://t.me/xiyuxuexi)
 
 每日习语学习
 
