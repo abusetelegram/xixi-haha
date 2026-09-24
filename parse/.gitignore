@@ -2,3 +2,6 @@ api/
 articles/
 entries.json
 __pycache__/
+.venv/
+result.json
+.update.lock

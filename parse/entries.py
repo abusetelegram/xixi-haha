@@ -1,4 +1,4 @@
-"""Compatibility alias for the historical misspelled entry point."""
+"""Fetch fresh listing pages (correctly spelled entry point)."""
 import sys
 
 from update import main

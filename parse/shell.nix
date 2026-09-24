@@ -2,8 +2,7 @@
 { pkgs ? import <nixpkgs> {} }:
 let
   python-with-my-packages = pkgs.python3.withPackages (p: with p; [
-    requests
-    aiohttp
+    requests # retained for the historical v1 scripts
     beautifulsoup4
     # other python packages you want
   ]);
