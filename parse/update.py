@@ -295,7 +295,10 @@ def full_records(directory: Path, known: dict) -> dict:
     for row in rows:
         if not isinstance(row, dict) or not isinstance(row.get("article"), str):
             raise FormatError("Invalid full corpus record")
-        result[article_id(row.get("id"))] = row
+        aid = article_id(row.get("id"))
+        if aid in result:
+            raise FormatError("Duplicate full corpus article ID {}".format(aid))
+        result[aid] = row
     for aid in sorted(set(known) - result.keys(), key=int):
         # A previous minimal-only update may already have published this ID.
         saved = known[aid]
