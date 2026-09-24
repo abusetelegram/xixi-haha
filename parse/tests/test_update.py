@@ -203,6 +203,40 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(full[-1]["id"], "8")
         self.assertEqual(archive_path.read_bytes(), archive_bytes)
 
+    def test_full_output_rejects_identical_duplicates_without_changing_loose_outputs(self):
+        rows = [record(aid) for aid in self.known]
+        rows.append(copy.deepcopy(rows[0]))
+        path = self.directory / "result.json"
+        update.write_json(path, rows)
+        full_bytes = path.read_bytes()
+        update.atomic_write(self.directory / "articles" / "8", CURRENT)
+
+        with self.assertRaisesRegex(update.FormatError, "Duplicate full corpus article ID"):
+            update.extract(self.directory, {"8": entry(8)}, self.known, write_full=True)
+
+        self.assertEqual(path.read_bytes(), full_bytes)
+        self.assertEqual((self.directory / "result-min.json").read_bytes(), self.original_bytes)
+
+    def test_full_output_rejects_integer_string_aliases_without_changing_archive_outputs(self):
+        first = record(3)
+        alias = copy.deepcopy(first)
+        alias["id"] = 3
+        payload = json.dumps([first, alias]).encode()
+        archive_path = self.directory / "result-full.tgz"
+        with tarfile.open(archive_path, "w:gz") as archive:
+            info = tarfile.TarInfo("result.json")
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
+        archive_bytes = archive_path.read_bytes()
+        update.atomic_write(self.directory / "articles" / "8", CURRENT)
+
+        with self.assertRaisesRegex(update.FormatError, "Duplicate full corpus article ID 3"):
+            update.extract(self.directory, {"8": entry(8)}, self.known, write_full=True)
+
+        self.assertEqual(archive_path.read_bytes(), archive_bytes)
+        self.assertFalse((self.directory / "result.json").exists())
+        self.assertEqual((self.directory / "result-min.json").read_bytes(), self.original_bytes)
+
     def test_full_output_missing_history_fails_before_publication(self):
         update.atomic_write(self.directory / "articles" / "8", CURRENT)
         with self.assertRaises(update.FormatError):
