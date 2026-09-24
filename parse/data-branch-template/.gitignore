@@ -1,0 +1,8 @@
+.cache/
+.state/
+.update.lock
+result.json
+result-min.json
+result-full.tgz
+*.tmp
+.DS_Store
