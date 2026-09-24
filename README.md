@@ -30,6 +30,18 @@ Telegram Bot: [@xixi_haha_bot](https://t.me/xixi_haha_bot)
 
 成品是[result.tgz](./parse), 缩减版本成品是[result-min.json](./parse/result-min.json)
 
+## 更新数据
+
+新的抓取 CLI 支持增量更新、全量扫描、分阶段运行和日志级别配置，保留现有记录及原始归档，基础 URL 不变。
+安装和完整用法见 [parse/README.md](./parse/README.md)。
+
+```bash
+uv sync --locked
+uv run --locked python parse/update.py update --log-level INFO
+# 首次补齐历史缺漏：
+uv run --locked python parse/update.py update --full-scan --write-full
+```
+
 ## Web服务
 
 见`web/`
