@@ -28,6 +28,11 @@ Browse the repository data at:
 
 <https://github.com/abusetelegram/xixi-haha/tree/data/articles>
 
+Deterministic minimal/full JSON, TGZ, and provenance exports are attached to
+successful update workflow runs:
+
+<https://github.com/abusetelegram/xixi-haha/actions/workflows/update-data.yml>
+
 The parser and validation tool remain on the code branch. From that checkout:
 
 ```sh

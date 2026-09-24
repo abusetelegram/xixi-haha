@@ -3,32 +3,128 @@ name: docker-telegram-bot
 on:
   push:
     branches:
-      - 'master'
+      - master
+  workflow_call:
+    inputs:
+      data_sha:
+        description: Exact published data commit to build into the image
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-telegram-publish
+  cancel-in-progress: false
 
 jobs:
-  docker:
+  resolve_data:
+    name: resolve and validate exact data commit
     runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.resolve.outputs.source_sha }}
+      data_sha: ${{ steps.resolve.outputs.data_sha }}
     steps:
-      -
-        name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
-      -
-        name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
-      -
-        name: Login to DockerHub
-        uses: docker/login-action@v2
+      - name: Check out exact source commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Resolve immutable source and data SHAs
+        id: resolve
+        env:
+          REQUESTED_DATA_SHA: ${{ inputs.data_sha }}
+        run: |
+          set -euo pipefail
+          source_sha="$(git rev-parse HEAD)"
+          if [[ -n "$REQUESTED_DATA_SHA" ]]; then
+            if [[ ! "$REQUESTED_DATA_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo 'data_sha must be an exact lowercase 40-hex commit SHA.' >&2
+              exit 2
+            fi
+            data_sha="$REQUESTED_DATA_SHA"
+          else
+            data_sha="$(git ls-remote --exit-code origin refs/heads/data | awk 'NR == 1 { print $1 }')"
+            if [[ ! "$data_sha" =~ ^[0-9a-f]{40}$ ]]; then
+              echo 'The published data branch is missing or did not resolve to one commit.' >&2
+              exit 1
+            fi
+          fi
+          git fetch --no-tags origin refs/heads/data:refs/remotes/origin/data
+          git cat-file -e "$data_sha^{commit}"
+          git merge-base --is-ancestor "$data_sha" refs/remotes/origin/data
+          printf 'source_sha=%s\ndata_sha=%s\n' "$source_sha" "$data_sha" >> "$GITHUB_OUTPUT"
+
+  docker:
+    name: build and publish exact-data Telegram image
+    needs: resolve_data
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out exact source commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: code
+          ref: ${{ needs.resolve_data.outputs.source_sha }}
+          persist-credentials: false
+
+      - name: Check out exact data commit separately
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: data
+          ref: ${{ needs.resolve_data.outputs.data_sha }}
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: '0.12.18'
+          enable-cache: true
+          cache-dependency-glob: code/uv.lock
+
+      - name: Synchronize locked dependencies
+        working-directory: code
+        run: |
+          uv python install '3.13'
+          uv sync --locked --python '3.13'
+
+      - name: Generate Telegram v2 data from exact canonical commit
+        working-directory: code
+        env:
+          SOURCE_SHA: ${{ needs.resolve_data.outputs.source_sha }}
+          DATA_SHA: ${{ needs.resolve_data.outputs.data_sha }}
+        run: |
+          set -euo pipefail
+          uv run --frozen --python '3.13' python scripts/data_pipeline.py export \
+            --minimal-only \
+            --code-dir "$GITHUB_WORKSPACE/code" \
+            --data-dir "$GITHUB_WORKSPACE/data" \
+            --output-dir "$RUNNER_TEMP/telegram-data" \
+            --code-sha "$SOURCE_SHA" \
+            --data-sha "$DATA_SHA"
+          cp "$RUNNER_TEMP/telegram-data/result-min.json" telegram/xi.json
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Login to DockerHub
+        uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - uses: actions/checkout@v2
-      - 
-        name: Copy Resource File
-        run: cp ./parse/result-min.json telegram/xi.json
-      -
-        name: Build and push
-        uses: docker/build-push-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
           push: true
-          context: ./telegram
+          context: ./code/telegram
           tags: neverbehave/xixi-haha-bot:latest
+          labels: |
+            org.opencontainers.image.revision=${{ needs.resolve_data.outputs.source_sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.xixi-haha.data.revision=${{ needs.resolve_data.outputs.data_sha }}
