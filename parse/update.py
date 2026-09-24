@@ -39,11 +39,21 @@ def normalize_entry(row: dict) -> dict:
     if not isinstance(row, dict):
         raise FormatError("Listing row must be an object")
     result = {"article_id": article_id(row.get("article_id"))}
-    for key in ("title", "input_date", "origin_name"):
+    for key in ("title", "input_date"):
         value = row.get(key)
-        if not isinstance(value, str) or (key != "origin_name" and not value.strip()):
+        if not isinstance(value, str) or not value.strip():
             raise FormatError("Listing row is missing {}".format(key))
         result[key] = value
+    if "origin_name" not in row:
+        raise FormatError("Listing row is missing origin_name")
+    author = row["origin_name"]
+    if author is None:
+        # The live v2 listing uses explicit null for a small number of
+        # unattributed articles; the historical corpus represents these as "".
+        author = ""
+    elif not isinstance(author, str):
+        raise FormatError("Listing row has invalid origin_name")
+    result["origin_name"] = author
     return result
 
 

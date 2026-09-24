@@ -87,6 +87,29 @@ class ParsingTests(unittest.TestCase):
         rows, _ = update.parse_listing(payload, 1)
         self.assertEqual(rows[0]["article_id"], "123")
 
+    def test_null_author_normalizes_through_listing_and_record_generation(self):
+        payload = listing(331, [32342100], 15091)
+        payload["list"][0]["origin_name"] = None
+        rows, total = update.parse_listing(payload, 331)
+        self.assertEqual(total, 15091)
+        self.assertEqual(rows[0]["origin_name"], "")
+        self.assertEqual(update.parse_article(LEGACY, rows[0])["author"], "")
+
+    def test_empty_author_is_preserved(self):
+        row = entry(32342100)
+        row["origin_name"] = ""
+        self.assertEqual(update.normalize_entry(row)["origin_name"], "")
+
+    def test_missing_and_wrong_type_author_remain_invalid(self):
+        missing = entry(32342100)
+        del missing["origin_name"]
+        with self.assertRaisesRegex(update.FormatError, "missing origin_name"):
+            update.normalize_entry(missing)
+        for value in (False, 0, [], {}):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                    update.FormatError, "invalid origin_name"):
+                update.normalize_entry(dict(entry(32342100), origin_name=value))
+
     def test_unknown_listing_shapes_fail_closed(self):
         valid = listing(1, [1], 1)
         for changes in ({"status": "error"}, {"total": "oops"}, {"curPage": 2},
