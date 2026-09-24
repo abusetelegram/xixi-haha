@@ -36,9 +36,10 @@ Telegram Bot: [@xixi_haha_bot](https://t.me/xixi_haha_bot)
 安装和完整用法见 [parse/README.md](./parse/README.md)。
 
 ```bash
-parse/.venv/bin/python parse/update.py update --log-level INFO
+uv sync --locked
+uv run --locked python parse/update.py update --log-level INFO
 # 首次补齐历史缺漏：
-parse/.venv/bin/python parse/update.py update --full-scan --write-full
+uv run --locked python parse/update.py update --full-scan --write-full
 ```
 
 ## Web服务

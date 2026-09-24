@@ -5,20 +5,22 @@ from the repository root; data paths default to `parse/`, not the working direct
 
 ## Install and run
 
+Install [uv](https://docs.astral.sh/uv/), then sync the locked environment from
+the repository root:
+
 ```sh
-python3 -m venv parse/.venv
-parse/.venv/bin/python -m pip install -r parse/requirements.txt
+uv sync --locked
 
 # Fetch recent missing articles and merge into result-min.json.
-parse/.venv/bin/python parse/update.py update
+uv run --locked python parse/update.py update
 
 # Reconcile older gaps as well; recommended for the initial migration.
 # This scans the entire listing and can take a long time.
-parse/.venv/bin/python parse/update.py update --full-scan --write-full
+uv run --locked python parse/update.py update --full-scan --write-full
 
 # Inspect options, or enable detailed request/exception diagnostics.
-parse/.venv/bin/python parse/update.py --help
-parse/.venv/bin/python parse/update.py update --log-level DEBUG
+uv run --locked python parse/update.py --help
+uv run --locked python parse/update.py update --log-level DEBUG
 ```
 
 `update` is the default mode. Logs go to stderr. Exit codes: `0` success,
@@ -39,15 +41,10 @@ and unknown formats stop the run instead of silently publishing incomplete data.
 | `extract` | No | Validate cached HTML and merge new records into `result-min.json` |
 
 ```sh
-parse/.venv/bin/python parse/update.py entries --full-scan
-parse/.venv/bin/python parse/update.py download
-parse/.venv/bin/python parse/update.py extract --write-full
+uv run --locked python parse/update.py entries --full-scan
+uv run --locked python parse/update.py download
+uv run --locked python parse/update.py extract --write-full
 ```
-
-The historical `entires.py` (typo), corrected `entries.py`, `articles.py`, and
-`articleExt.py` remain wrappers. They accept the same options. `articleExt.py`
-also enables `--write-full`, preserving its two-output behavior. They no longer
-perform network or filesystem operations merely by being imported.
 
 ### Incremental vs. full scans
 
@@ -75,7 +72,7 @@ starts a new corpus; it does not implicitly import the repository's data.
 ```sh
 tmp=$(mktemp -d)
 cp parse/result-min.json "$tmp/"
-parse/.venv/bin/python parse/update.py update --data-dir "$tmp" --max-pages 1
+uv run --locked python parse/update.py update --data-dir "$tmp" --max-pages 1
 ```
 
 The repository data remains untouched. To test `--write-full` in that directory,
@@ -131,11 +128,33 @@ to whole-page text or truncated previews.
 
 ## Tests
 
+The unit suite is network-free. After a locked sync, run it with uv's network
+access disabled:
+
 ```sh
-parse/.venv/bin/python -m unittest discover -s parse/tests -v
+uv sync --locked
+uv run --frozen --offline python -m unittest discover -s parse/tests -v
 ```
 
-Tests are offline. Fixtures are small, synthetic structural equivalents of the
+The real-site smoke test is deliberately separate and opt-in locally. It makes
+exactly two logical HTTP requests (listing page 1 and its first article), uses a
+10-second timeout, disables retries, paces the requests, invokes the canonical
+CLI against a temporary data directory, and validates the generated minimal
+record. It never writes repository corpus or cache paths:
+
+```sh
+uv run --frozen python parse/tests/live_smoke.py
+```
+
+CI uses `uv sync --locked`, so a stale lock fails rather than being accepted. Every
+matching pull request and push runs the offline unit matrix on Python 3.9 and 3.13
+plus the separate, mandatory live-site job; `workflow_dispatch` runs both jobs on
+demand. The live job has a two-minute job timeout and does not skip or ignore
+upstream failures. Keeping it separate makes upstream availability failures
+distinguishable from deterministic parser-test failures.
+
+Use `uv lock --check` to verify that `uv.lock` is consistent with
+`pyproject.toml`. Fixtures are small, synthetic structural equivalents of the
 observed current/legacy HTML. Coverage includes pagination, stale caches,
 add-only/idempotent merging, historical empty data, archive preservation,
-interrupted writes, writer locking, retries, CLI compatibility, and format failures.
+interrupted writes, writer locking, retries, canonical CLI behavior, and format failures.

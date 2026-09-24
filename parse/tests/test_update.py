@@ -296,14 +296,12 @@ class ClientAndCliTests(unittest.TestCase):
             with self.assertLogs(update.LOGGER, level="ERROR"):
                 self.assertEqual(update.main(["extract", "--data-dir", directory]), 1)
 
-    def test_all_entry_points_offer_help_without_network_or_cwd_dependency(self):
-        for name in ("update.py", "entries.py", "entires.py", "articles.py", "articleExt.py"):
-            with self.subTest(name=name):
-                command = Path(update.__file__).parent / name
-                result = subprocess.run([sys.executable, str(command), "--help"], cwd="/",
-                                        capture_output=True, text=True)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn("--log-level", result.stdout)
+    def test_canonical_cli_offers_help_without_network_or_cwd_dependency(self):
+        command = Path(update.__file__)
+        result = subprocess.run([sys.executable, str(command), "--help"], cwd="/",
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--log-level", result.stdout)
 
     def test_cli_extract_mode_and_case_insensitive_log_level(self):
         with tempfile.TemporaryDirectory() as directory:

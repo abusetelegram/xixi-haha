@@ -4,27 +4,51 @@ on:
   push:
     paths:
       - 'parse/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
       - '.github/workflows/parse-tests.yml'
   pull_request:
     paths:
       - 'parse/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
       - '.github/workflows/parse-tests.yml'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  tests:
+  unit-offline:
+    name: offline unit tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
         python-version: ['3.9', '3.13']
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v6
         with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
-          cache-dependency-path: parse/requirements.txt
-      - run: python -m pip install -r parse/requirements.txt
-      - run: python -m unittest discover -s parse/tests -v
+          version: '0.12.18'
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv python install "${{ matrix.python-version }}"
+      - run: uv sync --locked --python "${{ matrix.python-version }}"
+      - name: Run unit tests without uv network access
+        run: uv run --frozen --offline --python "${{ matrix.python-version }}" python -m unittest discover -s parse/tests -v
+
+  live-site-smoke:
+    name: bounded live-site smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.12.18'
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv python install '3.13'
+      - run: uv sync --locked --python '3.13'
+      - name: Fetch one listing and one article, then validate CLI output
+        run: uv run --frozen --python '3.13' python parse/tests/live_smoke.py
