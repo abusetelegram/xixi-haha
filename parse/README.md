@@ -103,7 +103,11 @@ uv run --locked python scripts/data_pipeline.py publish \
 
 A remote race leaves the local commit for inspection but rejects the push; fetch
 the new data tip and rerun acquisition rather than rebasing generated output or
-force-pushing.
+force-pushing. For an initial supervised catch-up, keep incremental mode and
+raise its finite guards only as needed. Retain the same local data worktree so
+ignored `.state/entries.json` and validated `.cache/html/` files can preserve a
+discovered backlog and avoid repeat article downloads after interruption. These
+resume aids are local-only; do not assume they survive on a fresh Actions runner.
 
 ## Deterministic exports
 
@@ -143,8 +147,12 @@ data checkouts, locked uv dependencies, finite scan/addition guards, one normal
 branch must already exist; otherwise the workflow fails clearly.
 
 Manual dispatch defaults to dry-run and privileged jobs run only when the event ref
-is the repository's actual default branch. Clear dry-run only after reviewing
-bounds. Full scans use a 2.1-second request delay (the one-second pace produced
+is the repository's actual default branch. Incremental dispatches expose
+`max_pages` and `max_additions` with defaults 50/200 and validated upper bounds
+2000/5000; use larger values only for a supervised initial catch-up. The weekly
+schedule always uses 50/200 regardless of manual inputs. Clear dry-run only after
+reviewing bounds. Full scans remain an explicit reconciliation mode with fixed
+2000/5000 guards and a 2.1-second request delay (the one-second pace produced
 403 responses during a long scan); incremental scans retain the one-second
 pace. `export-only` requires an exact lowercase 40-hex commit reachable from the
 published `data` branch and retries derivative artifacts without changing data.
