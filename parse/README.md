@@ -23,9 +23,13 @@ existing article edits and deletions fail validation. Historical values,
 including 29 empty `text` arrays in the original 12,291 records, are preserved;
 new parser-created records must have nonempty text.
 
-Caches and listing state are ignored under `.cache/` and `.state/`. They are
-retry aids, not authoritative data. Generated aggregates must be written outside
-the data checkout and must not be committed to `data`.
+Caches and listing state are ignored under `.cache/` and `.state/`. Listings are
+stored in `.state/entries.json`; diagnostic API snapshots and validated HTML are
+stored under `.cache/api/` and `.cache/html/`. They are retry aids, not
+authoritative data and never make an ID count as published. The updater lock
+spans discovery, cache/state writes, downloads, and publication. Generated
+aggregates must be written outside the data checkout and must not be committed
+to `data`.
 
 ## Initial local import
 
@@ -55,10 +59,13 @@ for `result-min.json`.
 
 ## Incremental and full catch-up
 
-The updater prints one JSON report. Publication requires exit status 0 and
-`"complete": true`. Weekly incremental discovery starts at page 1 and stops
-after two wholly known pages. A full scan lists every advertised page but still
-fetches only IDs absent from the canonical store.
+The updater prints one JSON report. `update` is its only mode and is also the
+default positional command. Publication requires exit status 0 and
+`"complete": true`; argument errors exit 2 and interruption exits 130. Weekly
+incremental discovery starts at page 1 and stops after two wholly known pages.
+A full scan lists every advertised page but still fetches only IDs absent from
+the canonical store. Requests are sequential; `--delay`, `--timeout`, and
+`--retries` configure pacing and bounded transient retries.
 
 ```sh
 # Routine incremental run with finite production guards.
@@ -76,10 +83,19 @@ uv run --locked python parse/update.py update \
 uv run --locked python parse/corpus.py validate --data-dir "$DATA"
 ```
 
+`--max-pages N` is a fail-closed request cap. If advertised pages remain when
+page `N` is reached, the report is incomplete with `stop_reason: page_limit` and
+publishes nothing; that cap takes precedence when the second known page is page
+`N`. A known-page stop before the cap succeeds, as does natural listing
+exhaustion exactly at the cap. Guard values must be positive.
+
 Reaching either guard is an incomplete failure and must not be committed. The
 upstream has no snapshot isolation; repeat supervised full scans until stable.
 Network, format, pagination, or article failures publish no partial batch.
-Validated caches may remain for retry.
+Validated caches may remain for retry. The updater does not read or write the
+checked-in migration aggregates and does not implement the historical
+`--write-full`/`result.json` updater workflow; aggregate creation is the separate
+export operation documented below.
 
 For a local incremental catch-up, capture the starting commit and machine report
 before acquisition. First run the publication gate with `--dry-run`; after
