@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Bounded opt-in smoke test against the live jhsjk listing and one article."""
+"""Bounded opt-in smoke test: one live listing plus one live article."""
 
 import json
 from pathlib import Path
-import subprocess
 import sys
 import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import corpus
 import update
 
 
@@ -32,32 +32,27 @@ def main():
     require(parsed["text"] and all(line.strip() for line in parsed["text"]),
             "live article has no non-empty extracted paragraphs")
 
-    # Exercise the canonical CLI and its output contract in an isolated data path.
+    # Exercise the fetch/cache and canonical create-only store contracts without
+    # another network request or any repository-local output.
+    class CachedResponse:
+        def article(self, requested):
+            require(requested == aid, "fetch requested a different article")
+            return html
+
     with tempfile.TemporaryDirectory(prefix="xixi-haha-live-") as temporary:
         directory = Path(temporary)
-        update.write_json(directory / "entries.json", [selected])
-        update.atomic_write(directory / "articles" / aid, html)
-        command = [
-            sys.executable,
-            str(Path(update.__file__).resolve()),
-            "extract",
-            "--data-dir",
-            str(directory),
-            "--timeout",
-            "10",
-            "--retries",
-            "0",
-            "--delay",
-            "0.5",
-        ]
-        result = subprocess.run(command, capture_output=True, text=True)
-        require(result.returncode == 0,
-                "parser CLI failed: {}".format(result.stderr.strip() or result.stdout.strip()))
-        output = update.read_json(directory / "result-min.json", None)
-        require(isinstance(output, dict) and set(output) == {aid},
-                "parser CLI did not write exactly the selected live article")
-        expected = {key: parsed[key] for key in ("title", "date", "author", "editor", "text")}
-        require(output[aid] == expected, "parser CLI output differs from validated live content")
+        fetched = update.fetch_missing(
+            directory, CachedResponse(), {aid: selected}, known=set())
+        require(fetched["downloaded"] == 1 and len(fetched["records"]) == 1,
+                "fetch contract did not return one downloaded record")
+        added = corpus.create_articles(directory, fetched["records"], strict_content=True)
+        require(added == 1, "canonical store did not add exactly one article")
+        stored = corpus.load_articles(directory)
+        require(stored == {aid: parsed}, "stored canonical record differs from live parse")
+        require(update.html_cache_path(directory, aid).exists(),
+                "validated HTML was not retained in the ignored cache")
+        require((directory / "articles" / (aid + ".json")).exists(),
+                "canonical article file is missing")
 
     print(json.dumps({
         "requests": 2,
@@ -68,7 +63,7 @@ def main():
         "article_id": aid,
         "text_paragraphs": len(parsed["text"]),
         "text_characters": sum(len(line) for line in parsed["text"]),
-        "cli_output_validated": True,
+        "fetch_store_validated": True,
     }, ensure_ascii=False, sort_keys=True))
     return 0
 

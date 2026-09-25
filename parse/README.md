@@ -1,160 +1,224 @@
-# Corpus updater
+# Canonical article corpus tools
 
-Python 3.9+ CLI for `http://jhsjk.people.cn` (base URL unchanged). Run commands
-from the repository root; data paths default to `parse/`, not the working directory.
+Python 3.9+ tools for the add-only article corpus. Code stays on `master` (or a
+review branch); canonical data stays in a separate checkout of the orphan
+`data` branch. Never execute code from the data checkout.
 
-## Install and run
+## Install
 
-Install [uv](https://docs.astral.sh/uv/), then sync the locked environment from
-the repository root:
+Run from the code checkout and use the locked dependencies:
 
 ```sh
 uv sync --locked
-
-# Fetch recent missing articles and merge into result-min.json.
-uv run --locked python parse/update.py update
-
-# Reconcile older gaps as well; recommended for the initial migration.
-# This scans the entire listing and can take a long time.
-uv run --locked python parse/update.py update --full-scan --write-full
-
-# Inspect options, or enable detailed request/exception diagnostics.
-uv run --locked python parse/update.py --help
-uv run --locked python parse/update.py update --log-level DEBUG
 ```
 
-`update` is the default mode. Logs go to stderr. Exit codes: `0` success,
-`1` fetch/format/filesystem failure, `2` invalid arguments, `130` interruption.
-Log levels: `DEBUG`, `INFO` (default), `WARNING`, `ERROR`, `CRITICAL`, case-insensitive.
-Requests are sequential and paced (`--delay 0.5` seconds minimum between starts),
-with a 30-second timeout and three retries for transient failures. Configure with
-`--delay`, `--timeout`, and `--retries` (`0` disables retries). Permanent HTTP errors
-and unknown formats stop the run instead of silently publishing incomplete data.
+Every mutating command requires an explicit external `--data-dir`.
 
-## Modes
+## Data contract
 
-| Mode | Network | Behavior |
-| --- | --- | --- |
-| `update` | Yes | Discover → download → extract/publish |
-| `entries` | Yes | Refresh listings and merge `entries.json`; no corpus changes |
-| `download` | Yes | Fetch missing/invalid HTML for unpublished IDs in `entries.json` |
-| `extract` | No | Validate cached HTML and merge new records into `result-min.json` |
+Canonical records are deterministic UTF-8 JSON files at
+`articles/<positive-decimal-id>.json`. Each has exactly `id`, `title`, `date`,
+`author`, `editor`, `article`, and `text`. Routine updates only add files:
+existing article edits and deletions fail validation. Historical values,
+including 29 empty `text` arrays in the original 12,291 records, are preserved;
+new parser-created records must have nonempty text.
+
+Caches and listing state are ignored under `.cache/` and `.state/`. Listings are
+stored in `.state/entries.json`; diagnostic API snapshots and validated HTML are
+stored under `.cache/api/` and `.cache/html/`. They are retry aids, not
+authoritative data and never make an ID count as published. The updater lock
+spans discovery, cache/state writes, downloads, and publication. Generated
+aggregates must be written outside the data checkout and must not be committed
+to `data`.
+
+## Initial local import
+
+Use separate code and data worktrees. The import is idempotent and validates the
+legacy full/minimal projection before publishing any canonical article:
 
 ```sh
-uv run --locked python parse/update.py entries --full-scan
-uv run --locked python parse/update.py download
-uv run --locked python parse/update.py extract --write-full
+CODE=/absolute/path/to/xixi-haha-code
+DATA=/absolute/path/to/xixi-haha-data
+
+cd "$CODE"
+uv run --locked python parse/corpus.py import-legacy \
+  --archive parse/result-full.tgz \
+  --minimal parse/result-min.json \
+  --data-dir "$DATA"
+uv run --locked python parse/corpus.py validate \
+  --data-dir "$DATA" \
+  --archive parse/result-full.tgz \
+  --minimal parse/result-min.json
 ```
 
-### Incremental vs. full scans
+The fixed bootstrap inputs are SHA-256
+`41db9865a5b5bbb907aea5fd814bbbabdb9ccf18e0614c7f2b0d28156e12c607`
+for `result-full.tgz` and
+`79468406fb3594807af95208686c2b23bc8d4aa0fc685d386f55e21416be461c`
+for `result-min.json`.
 
-Every discovery starts at page 1. Cached page numbers are **not** checkpoints:
-new arrivals shift the contents of every subsequent page. Default discovery stops
-after two consecutive pages whose IDs are already in **published** `result-min.json`.
-Knowing an ID only in `entries.json` does not count as having downloaded it.
+## Incremental and full catch-up
 
-This is a fast latest-first heuristic, not an exhaustive reconciliation guarantee.
-Use `--full-scan` for the initial catch-up and periodically thereafter to discover
-older gaps, backdated articles, or reordered entries. Pagination derives the page
-size from the first response instead of hardcoding ten. Duplicate IDs across pages
-are merged. The remote API has no snapshot isolation; another full scan may be
-needed if entries move while crawling.
-
-`--max-pages N` explicitly limits discovery (a **partial** scan), useful for smoke
-tests. It does not limit previously queued IDs in `entries.json`. A successful
-limited run does not mean the whole site has been synchronized.
-
-### Isolated smoke test
-
-`--data-dir` selects an independent corpus/cache directory. An empty directory
-starts a new corpus; it does not implicitly import the repository's data.
+The updater prints one JSON report. `update` is its only mode and is also the
+default positional command. Publication requires exit status 0 and
+`"complete": true`; argument errors exit 2 and interruption exits 130. Weekly
+incremental discovery starts at page 1 and stops after two wholly known pages.
+A full scan lists every advertised page but still fetches only IDs absent from
+the canonical store. Requests are sequential; `--delay`, `--timeout`, and
+`--retries` configure pacing and bounded transient retries.
 
 ```sh
-tmp=$(mktemp -d)
-cp parse/result-min.json "$tmp/"
-uv run --locked python parse/update.py update --data-dir "$tmp" --max-pages 1
+# Routine incremental run with finite production guards.
+uv run --locked python parse/update.py update \
+  --data-dir "$DATA" \
+  --max-pages 50 --max-additions 200 \
+  --delay 1 --timeout 30 --retries 3
+
+# Supervised catch-up/reconciliation with larger finite guards.
+uv run --locked python parse/update.py update \
+  --data-dir "$DATA" --full-scan \
+  --max-pages 2000 --max-additions 5000 \
+  --delay 2.1 --timeout 30 --retries 3
+
+uv run --locked python parse/corpus.py validate --data-dir "$DATA"
 ```
 
-The repository data remains untouched. To test `--write-full` in that directory,
-also copy `parse/result-full.tgz` before running the updater.
+`--max-pages N` is a fail-closed request cap. If advertised pages remain when
+page `N` is reached, the report is incomplete with `stop_reason: page_limit` and
+publishes nothing; that cap takes precedence when the second known page is page
+`N`. A known-page stop before the cap succeeds, as does natural listing
+exhaustion exactly at the cap. Guard values must be positive.
 
-## Data preservation and project compatibility
+Reaching either guard is an incomplete failure and must not be committed. The
+upstream has no snapshot isolation; repeat supervised full scans until stable.
+Network, format, pagination, or article failures publish no partial batch.
+Validated caches may remain for retry. The updater does not read or write the
+checked-in migration aggregates and does not implement the historical
+`--write-full`/`result.json` updater workflow; aggregate creation is the separate
+export operation documented below.
 
-- The canonical output remains an object keyed by article ID, with exactly the
-  existing fields: `title`, `date`, `author`, `editor`, `text` (paragraph array).
-  This matches `telegram/index.js`; deploy it as `telegram/xi.json` as before.
-- Updates are **add-only**. Existing records are never deleted or rewritten,
-  even when upstream removes or edits them. Historical quirks (including 29 empty
-  text arrays in the checked-in corpus) are preserved. New articles must have text.
-- `result-full.tgz` and `v1/xi.json` are historical artifacts and are never changed.
-  `--write-full` additionally merges the full-record list into `result.json`,
-  seeding from `result-full.tgz` when needed. Keep the archive and HTML caches:
-  upgrading a minimal-only run to full output uses them to recover original HTML.
-  If historical HTML is unavailable, full export fails rather than fabricating it.
-- `web/` still consumes the **v1 flat string array**, not the v2 ID-keyed object.
-  Do not replace `web/xi.json` with `result-min.json`; changing that service's data
-  contract is outside this parser update.
-- JSON and HTML writes use temporary files plus atomic replacement. All new
-  articles must validate before corpus publication. A failure leaves validated
-  caches for retry and leaves existing records intact. With `--write-full`, full
-  output is published first; each file is atomic, but the two files are not a
-  single transaction. Rerunning completes an interrupted publication.
-- `.update.lock` prevents concurrent CLI writers to the same data directory.
-  Normal exit/interruption removes it. After a hard kill, inspect the PID in that
-  file and remove the lock **only after confirming no updater is running**.
-- Missing metadata/caches do not remove historical corpus records. Existing
-  `entries.json` is merged; old `api/` files are retained only as diagnostic
-  snapshots and are never used to skip fresh network discovery.
+For a local incremental catch-up, capture the starting commit and machine report
+before acquisition. First run the publication gate with `--dry-run`; after
+reviewing the new article files, repeat the same gate without `--dry-run` to
+create one additions-only commit and perform a normal, non-forced push:
 
-## Upstream format findings and maintenance
+```sh
+START_DATA_SHA=$(git -C "$DATA" rev-parse HEAD)
+SOURCE_SHA=$(git rev-parse HEAD)
+REPORT=$(mktemp)
+set -o pipefail
+uv run --locked python parse/update.py update \
+  --data-dir "$DATA" \
+  --max-pages 50 --max-additions 200 \
+  --delay 1 --timeout 30 --retries 3 | tee "$REPORT"
 
-Live inspection on 2026-09-24 found:
+uv run --locked python scripts/data_pipeline.py publish \
+  --data-dir "$DATA" --report "$REPORT" \
+  --start-sha "$START_DATA_SHA" --source-sha "$SOURCE_SHA" \
+  --run-url "local://supervised-catch-up" --dry-run
 
-- `/testnew/result?page=1&source=2` still returns `status`, `total` (string),
-  `curPage`, and `list`. Rows use `article_id`, `title`, `input_date`, `origin_name`.
-- `newcontent` is sometimes a truncated preview; it is **not** a full-text source.
-- `/article/{id}` still uses `.d2txt_con` and optional `.editor`. Current HTML can
-  contain malformed nested `<p><p>` tags. Paragraph extraction handles these,
-  inline markup, line breaks, and legacy newline-only content without duplicating
-  nested paragraphs or collecting navigation/scripts.
-- Article requests worked with User-Agent/Referer headers; a bare urllib request
-  received HTTP 403. No stale hardcoded cookies are needed; cookies are session-managed.
+# After inspection, omit --dry-run to commit and push only new article files.
+uv run --locked python scripts/data_pipeline.py publish \
+  --data-dir "$DATA" --report "$REPORT" \
+  --start-sha "$START_DATA_SHA" --source-sha "$SOURCE_SHA" \
+  --run-url "local://supervised-catch-up"
+```
 
-There is no evidence that a different endpoint or speculative JSON schema adapter
-is needed. `parse_listing`, `normalize_entry`, and `parse_article` isolate upstream
-formats from storage. If the site changes, add a fixture and update the relevant
-adapter. Unknown structures intentionally fail closed rather than falling back
-to whole-page text or truncated previews.
+A remote race leaves the local commit for inspection but rejects the push; fetch
+the new data tip and rerun acquisition rather than rebasing generated output or
+force-pushing.
+
+## Deterministic exports
+
+Export only from a validated exact data commit into a new directory outside the
+data checkout:
+
+```sh
+CODE_SHA=$(git rev-parse HEAD)
+DATA_SHA=$(git -C "$DATA" rev-parse HEAD)
+OUT_ROOT=$(mktemp -d)
+OUT="$OUT_ROOT/exports"
+
+uv run --locked python parse/export.py \
+  --data-dir "$DATA" --output-dir "$OUT" \
+  --full-json --archive \
+  --code-sha "$CODE_SHA" --data-sha "$DATA_SHA"
+```
+
+Outputs are `result-min.json` (Telegram v2 projection), `result.json`,
+`result-full.tgz`, and `provenance.json`. The uncompressed full JSON is over
+100 MiB and must remain a downloadable CI artifact, never a Git blob. The helper
+used by CI additionally verifies clean exact-SHA checkouts:
+
+```sh
+HELPER_OUT="$OUT_ROOT/helper-exports"
+uv run --locked python scripts/data_pipeline.py export \
+  --code-dir "$CODE" --data-dir "$DATA" --output-dir "$HELPER_OUT" \
+  --code-sha "$CODE_SHA" --data-sha "$DATA_SHA"
+```
+
+## Automation
+
+`.github/workflows/update-data.yml` runs Mondays at 03:17 UTC and supports manual
+`incremental`, `full`, and `export-only` dispatches. It uses separate source and
+data checkouts, locked uv dependencies, finite scan/addition guards, one normal
+(non-forced) data push, exact-SHA exports, and serialized concurrency. The `data`
+branch must already exist; otherwise the workflow fails clearly.
+
+Manual dispatch defaults to dry-run and privileged jobs run only when the event ref
+is the repository's actual default branch. Clear dry-run only after reviewing
+bounds. Full scans use a 2.1-second request delay (the one-second pace produced
+403 responses during a long scan); incremental scans retain the one-second
+pace. `export-only` requires an exact lowercase 40-hex commit reachable from the
+published `data` branch and retries derivative artifacts without changing data.
+Successful changed updates upload all aggregate forms plus provenance as a
+GitHub Actions artifact and explicitly call the reusable Telegram build with the
+same data SHA and exact default-branch source SHA. The reusable consumer accepts
+only the default-branch update workflow's schedule/manual contexts, while its
+direct path remains limited to default-branch pushes. No-change runs make no
+commit and do not rebuild derivatives.
+
+Only the two DockerHub secrets required by the reusable image job are forwarded;
+the workflow does not use broad secret inheritance. These source-level event,
+ref, caller-path, and SHA checks make the checked-in workflow fail closed when
+it is accidentally dispatched against a feature/non-default ref. They are not
+a security boundary against a same-repository actor who can modify and execute
+a workflow (including removing these checks), nor against a repository
+administrator who can change Actions settings. Enforcing that stronger threat
+model requires protected environments or repository policy outside this
+source-only change.
+
+The workflow uses the repository's existing `DOCKERHUB_USERNAME` and
+`DOCKERHUB_TOKEN` secrets for image publication. No PAT, Pages action, or new
+storage service is required. The repository owner may optionally select the
+`data` branch/root in GitHub Pages settings; repository article files and the
+branch archive remain the primary distribution.
+
+## Compatibility and cutover
+
+The checked-in `parse/result-min.json` and `parse/result-full.tgz` remain
+**temporarily** on the code branch to bootstrap the data branch and avoid
+breaking old raw URLs. Remove them only in a later explicit cutover after data
+publication and consumer verification. `parse/v1/xi.json` and `web/` are a
+separate legacy flat-array contract and remain unchanged.
+
+The Telegram container consumes the v2 ID-keyed minimal projection. Its workflow
+now generates that projection from an explicit data commit instead of copying a
+mutable source-tree aggregate. Tests and pull requests never publish images.
 
 ## Tests
-
-The unit suite is network-free. After a locked sync, run it with uv's network
-access disabled:
 
 ```sh
 uv sync --locked
 uv run --frozen --offline python -m unittest discover -s parse/tests -v
+uv lock --check --offline
 ```
 
-The real-site smoke test is deliberately separate and opt-in locally. It makes
-exactly two logical HTTP requests (listing page 1 and its first article), uses a
-10-second timeout, disables retries, paces the requests, invokes the canonical
-CLI against a temporary data directory, and validates the generated minimal
-record. It never writes repository corpus or cache paths:
+The unit suite is network-free and covers add-only storage, updater guards,
+deterministic exports, no-change publication, nonzero acquisition, rejected
+mutations/deletions, push conflicts, and export failure cleanup. The optional
+bounded live smoke makes exactly one listing and one article request:
 
 ```sh
 uv run --frozen python parse/tests/live_smoke.py
 ```
-
-CI uses `uv sync --locked`, so a stale lock fails rather than being accepted. Every
-matching pull request and push runs the offline unit matrix on Python 3.9 and 3.13
-plus the separate, mandatory live-site job; `workflow_dispatch` runs both jobs on
-demand. The live job has a two-minute job timeout and does not skip or ignore
-upstream failures. Keeping it separate makes upstream availability failures
-distinguishable from deterministic parser-test failures.
-
-Use `uv lock --check` to verify that `uv.lock` is consistent with
-`pyproject.toml`. Fixtures are small, synthetic structural equivalents of the
-observed current/legacy HTML. Coverage includes pagination, stale caches,
-add-only/idempotent merging, historical empty data, archive preservation,
-interrupted writes, writer locking, retries, canonical CLI behavior, and format failures.

@@ -24,23 +24,32 @@ Telegram Bot: [@xixi_haha_bot](https://t.me/xixi_haha_bot)
 
 支持`inline mode`
 
-## 还有什么说的吗？
+## 数据与下载
 
-这个版本没有太注重分句，主要是清理了一下内容。抓取脚本（XJB）参考在`parse/`
+机器可读的权威语料位于独立的 [`data` 分支](https://github.com/abusetelegram/xixi-haha/tree/data/articles)，每篇文章一个 JSON 文件，并遵守 add-only 规则：
 
-成品是[result.tgz](./parse), 缩减版本成品是[result-min.json](./parse/result-min.json)
+- [浏览 `articles/`](https://github.com/abusetelegram/xixi-haha/tree/data/articles)
+- [下载整个 data 分支](https://github.com/abusetelegram/xixi-haha/archive/refs/heads/data.zip)
+- [查看数据更新和可下载聚合文件](https://github.com/abusetelegram/xixi-haha/actions/workflows/update-data.yml)（成功运行的 Actions artifact 包含 minimal/full JSON、TGZ 和 provenance）
+
+GitHub Pages 是可选展示入口，不是数据读取前提。仓库中的旧
+`parse/result-min.json` 和 `parse/result-full.tgz` 暂时保留用于首次导入和兼容；验证新流程后再单独决定移除。`parse/v1/xi.json` 与 `web/` 的旧数组格式保持不变。
 
 ## 更新数据
 
-新的抓取 CLI 支持增量更新、全量扫描、分阶段运行和日志级别配置，保留现有记录及原始归档，基础 URL 不变。
-安装和完整用法见 [parse/README.md](./parse/README.md)。
+抓取代码与数据 checkout 必须分开；所有数据命令都显式传入 data worktree。安装和导入、增量补齐、全量核对、确定性导出的完整用法见 [parse/README.md](./parse/README.md)。
 
 ```bash
 uv sync --locked
-uv run --locked python parse/update.py update --log-level INFO
-# 首次补齐历史缺漏：
-uv run --locked python parse/update.py update --full-scan --write-full
+uv run --locked python parse/update.py update \
+  --data-dir /absolute/path/to/xixi-haha-data \
+  --max-pages 50 --max-additions 200 \
+  --delay 1 --timeout 30 --retries 3
+uv run --locked python parse/corpus.py validate \
+  --data-dir /absolute/path/to/xixi-haha-data
 ```
+
+每周自动流程只新增文章，遇到不完整扫描、已有文章变化、删除、推送竞争或导出失败都会停止。聚合文件由精确的 data commit 生成并作为 GitHub Actions artifact 提供，不提交到 data 分支。
 
 ## Web服务
 
