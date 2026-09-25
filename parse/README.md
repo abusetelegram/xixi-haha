@@ -1,7 +1,8 @@
 # Corpus updater
 
 Python 3.9+ CLI for `http://jhsjk.people.cn` (base URL unchanged). Run commands
-from the repository root; data paths default to `parse/`, not the working directory.
+from the repository root and pass the external canonical data-branch worktree
+explicitly; the updater never defaults to repository data.
 
 ## Install and run
 
@@ -10,48 +11,35 @@ the repository root:
 
 ```sh
 uv sync --locked
+DATA=/path/to/article-data-worktree
 
-# Fetch recent missing articles and merge into result-min.json.
-uv run --locked python parse/update.py update
+# Fetch recent missing articles into the canonical create-only store.
+uv run --locked python parse/update.py update --data-dir "$DATA"
 
-# Reconcile older gaps as well; recommended for the initial migration.
-# This scans the entire listing and can take a long time.
-uv run --locked python parse/update.py update --full-scan --write-full
+# Reconcile older gaps as well; this can take a long time.
+uv run --locked python parse/update.py update --data-dir "$DATA" --full-scan
 
 # Inspect options, or enable detailed request/exception diagnostics.
 uv run --locked python parse/update.py --help
-uv run --locked python parse/update.py update --log-level DEBUG
+uv run --locked python parse/update.py update --data-dir "$DATA" --log-level DEBUG
 ```
 
-`update` is the default mode. Logs go to stderr. Exit codes: `0` success,
-`1` fetch/format/filesystem failure, `2` invalid arguments, `130` interruption.
-Log levels: `DEBUG`, `INFO` (default), `WARNING`, `ERROR`, `CRITICAL`, case-insensitive.
-Requests are sequential and paced (`--delay 0.5` seconds minimum between starts),
-with a 30-second timeout and three retries for transient failures. Configure with
-`--delay`, `--timeout`, and `--retries` (`0` disables retries). Permanent HTTP errors
-and unknown formats stop the run instead of silently publishing incomplete data.
-
-## Modes
-
-| Mode | Network | Behavior |
-| --- | --- | --- |
-| `update` | Yes | Discover → download → extract/publish |
-| `entries` | Yes | Refresh listings and merge `entries.json`; no corpus changes |
-| `download` | Yes | Fetch missing/invalid HTML for unpublished IDs in `entries.json` |
-| `extract` | No | Validate cached HTML and merge new records into `result-min.json` |
-
-```sh
-uv run --locked python parse/update.py entries --full-scan
-uv run --locked python parse/update.py download
-uv run --locked python parse/update.py extract --write-full
-```
+`update` is the only mode and is also the default positional command. Logs go to
+stderr. Exit codes: `0` success, `1` fetch/format/filesystem failure, `2` invalid
+arguments, `130` interruption. Log levels: `DEBUG`, `INFO` (default), `WARNING`,
+`ERROR`, `CRITICAL`, case-insensitive. Requests are sequential and paced
+(`--delay 0.5` seconds minimum between starts), with a 30-second timeout and three
+retries for transient failures. Configure with `--delay`, `--timeout`, and
+`--retries` (`0` disables retries). Permanent HTTP errors and unknown formats stop
+the run instead of silently publishing incomplete data.
 
 ### Incremental vs. full scans
 
 Every discovery starts at page 1. Cached page numbers are **not** checkpoints:
 new arrivals shift the contents of every subsequent page. Default discovery stops
-after two consecutive pages whose IDs are already in **published** `result-min.json`.
-Knowing an ID only in `entries.json` does not count as having downloaded it.
+after two consecutive pages whose IDs all exist in the canonical `articles/`
+store. An ID found only in `.state/entries.json` or `.cache/` does not count as
+published.
 
 This is a fast latest-first heuristic, not an exhaustive reconciliation guarantee.
 Use `--full-scan` for the initial catch-up and periodically thereafter to discover
@@ -60,51 +48,55 @@ size from the first response instead of hardcoding ten. Duplicate IDs across pag
 are merged. The remote API has no snapshot isolation; another full scan may be
 needed if entries move while crawling.
 
-`--max-pages N` explicitly limits discovery (a **partial** scan), useful for smoke
-tests. It does not limit previously queued IDs in `entries.json`. A successful
-limited run does not mean the whole site has been synchronized.
+`--max-pages N` is a fail-closed request cap. If the updater reaches page `N`
+while more pages remain, the run reports `page_limit` and publishes nothing; this
+check takes precedence when the second known page is page `N`. A known-page stop
+before the cap remains a successful incremental scan, and natural listing
+exhaustion on page `N` is also successful. The option does not discard IDs already
+queued in `.state/entries.json`. Values must be positive.
 
-### Isolated smoke test
+### Isolated bounded discovery check
 
 `--data-dir` selects an independent corpus/cache directory. An empty directory
-starts a new corpus; it does not implicitly import the repository's data.
+starts with no canonical articles; it does not implicitly import repository data.
+The following one-page check is intentionally incomplete when the live listing
+advertises additional pages, exits `1`, and publishes no article:
 
 ```sh
 tmp=$(mktemp -d)
-cp parse/result-min.json "$tmp/"
 uv run --locked python parse/update.py update --data-dir "$tmp" --max-pages 1
 ```
 
-The repository data remains untouched. To test `--write-full` in that directory,
-also copy `parse/result-full.tgz` before running the updater.
+Inspect the JSON report for `"stop_reason": "page_limit"`. Only ignored discovery
+state/cache files are created under the temporary directory; repository data
+remains untouched.
 
 ## Data preservation and project compatibility
 
-- The canonical output remains an object keyed by article ID, with exactly the
-  existing fields: `title`, `date`, `author`, `editor`, `text` (paragraph array).
-  This matches `telegram/index.js`; deploy it as `telegram/xi.json` as before.
-- Updates are **add-only**. Existing records are never deleted or rewritten,
-  even when upstream removes or edits them. Historical quirks (including 29 empty
-  text arrays in the checked-in corpus) are preserved. New articles must have text.
-- `result-full.tgz` and `v1/xi.json` are historical artifacts and are never changed.
-  `--write-full` additionally merges the full-record list into `result.json`,
-  seeding from `result-full.tgz` when needed. Keep the archive and HTML caches:
-  upgrading a minimal-only run to full output uses them to recover original HTML.
-  If historical HTML is unavailable, full export fails rather than fabricating it.
-- `web/` still consumes the **v1 flat string array**, not the v2 ID-keyed object.
-  Do not replace `web/xi.json` with `result-min.json`; changing that service's data
-  contract is outside this parser update.
-- JSON and HTML writes use temporary files plus atomic replacement. All new
-  articles must validate before corpus publication. A failure leaves validated
-  caches for retry and leaves existing records intact. With `--write-full`, full
-  output is published first; each file is atomic, but the two files are not a
-  single transaction. Rerunning completes an interrupted publication.
-- `.update.lock` prevents concurrent CLI writers to the same data directory.
-  Normal exit/interruption removes it. After a hard kill, inspect the PID in that
-  file and remove the lock **only after confirming no updater is running**.
-- Missing metadata/caches do not remove historical corpus records. Existing
-  `entries.json` is merged; old `api/` files are retained only as diagnostic
-  snapshots and are never used to skip fresh network discovery.
+- Canonical records are deterministic full-record JSON files at
+  `$DATA/articles/{id}.json`. The fields are `id`, `title`, `date`, `author`,
+  `editor`, `article`, and `text`; consumer aggregate generation is separate from
+  this updater.
+- Updates are **add-only**. Existing canonical records are never deleted or
+  rewritten, even when upstream removes or edits them. Historical records may
+  retain legacy quirks; newly fetched articles must contain readable text.
+- Checked-in migration inputs such as `result-min.json`, `result-full.tgz`, and
+  `v1/xi.json` are historical artifacts. The updater neither reads nor writes
+  them and does not support the former `--write-full`/`result.json` workflow.
+- Listing state is stored in `.state/entries.json`; diagnostic listing snapshots
+  and validated HTML are stored below `.cache/api/` and `.cache/html/`. These are
+  noncanonical retry aids and never make an ID count as published.
+- State and cache writes use temporary files plus atomic replacement. Every new
+  article in a batch is fetched and validated before canonical publication. A
+  failure can leave validated cache files for retry but leaves canonical records
+  unchanged.
+- `.update.lock` prevents concurrent CLI writers to the same data directory and
+  spans discovery, downloads, state/cache writes, and publication. Normal exit
+  or interruption removes it. After a hard kill, inspect the PID in that file and
+  remove the lock **only after confirming no updater is running**.
+- Missing state/cache files do not remove canonical records. Existing
+  `.state/entries.json` is merged, and `.cache/api/` snapshots are never used to
+  skip fresh discovery.
 
 ## Upstream format findings and maintenance
 
@@ -138,9 +130,9 @@ uv run --frozen --offline python -m unittest discover -s parse/tests -v
 
 The real-site smoke test is deliberately separate and opt-in locally. It makes
 exactly two logical HTTP requests (listing page 1 and its first article), uses a
-10-second timeout, disables retries, paces the requests, invokes the canonical
-CLI against a temporary data directory, and validates the generated minimal
-record. It never writes repository corpus or cache paths:
+10-second timeout, disables retries, and paces requests. In an isolated temporary
+data directory it validates the fetched article, cache contract, and canonical
+create-only store directly; it never writes repository corpus or cache paths:
 
 ```sh
 uv run --frozen python parse/tests/live_smoke.py
