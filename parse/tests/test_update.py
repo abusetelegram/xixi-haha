@@ -1,16 +1,15 @@
-import copy
 import io
 import json
 from pathlib import Path
 import subprocess
 import sys
-import tarfile
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import corpus
 import update
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -18,17 +17,14 @@ CURRENT = (FIXTURES / "current.html").read_text(encoding="utf-8")
 LEGACY = (FIXTURES / "legacy.html").read_text(encoding="utf-8")
 
 
-def entry(aid):
-    return {"article_id": str(aid), "title": " 标题 ", "input_date": "2026-09-24 08:28:01",
-            "origin_name": "来源", "newcontent": "这是截断摘要..."}
+def entry(aid, title=" 标题 "):
+    return {"article_id": str(aid), "title": title,
+            "input_date": "2026-09-24 08:28:01", "origin_name": "来源",
+            "newcontent": "ignored preview"}
 
 
-def record(aid):
-    return update.parse_article(LEGACY, entry(aid))
-
-
-def minimal(aid):
-    return {k: v for k, v in record(aid).items() if k not in ("id", "article")}
+def record(aid, html=LEGACY):
+    return update.parse_article(html, entry(aid))
 
 
 def listing(page, ids, total=8):
@@ -37,19 +33,26 @@ def listing(page, ids, total=8):
 
 
 class FakeClient:
-    def __init__(self, pages=None):
+    def __init__(self, pages=None, articles=None):
         self.pages = pages or {1: listing(1, [8, 7]), 2: listing(2, [6, 5]),
                                3: listing(3, [4, 3]), 4: listing(4, [2, 1])}
+        self.articles = articles or {}
         self.listing_calls = []
         self.article_calls = []
 
     def listing(self, page):
         self.listing_calls.append(page)
-        return self.pages[page]
+        value = self.pages[page]
+        if isinstance(value, BaseException):
+            raise value
+        return value
 
     def article(self, aid):
         self.article_calls.append(aid)
-        return CURRENT
+        value = self.articles.get(aid, CURRENT)
+        if isinstance(value, BaseException):
+            raise value
+        return value
 
 
 class ParsingTests(unittest.TestCase):
@@ -67,18 +70,45 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(result["text"], ["旧版第一段。", "旧版第二段。"])
         self.assertEqual(result["editor"], "不明")
 
-    def test_bad_body_is_not_published_as_text(self):
+    def test_bad_body_is_not_accepted(self):
         for html in ("<h1>Access denied</h1>", '<div class="d2txt_con"><img src="a"></div>',
                      '<div class="d2txt_con"><script>error()</script></div>'):
             with self.subTest(html=html), self.assertRaises(update.FormatError):
                 update.parse_article(html, entry(1))
 
-    def test_listing_normalizes_integer_ids(self):
+    def test_listing_normalizes_integer_and_leading_zero_ids(self):
         payload = listing(1, [123], 1)
         payload["list"][0]["article_id"] = 123
         rows, total = update.parse_listing(payload, 1)
         self.assertEqual(rows[0]["article_id"], "123")
+        self.assertEqual(set(rows[0]), {"article_id", "title", "input_date", "origin_name"})
         self.assertEqual(total, 1)
+        payload["list"][0]["article_id"] = "00123"
+        rows, _ = update.parse_listing(payload, 1)
+        self.assertEqual(rows[0]["article_id"], "123")
+
+    def test_null_author_normalizes_through_listing_and_record_generation(self):
+        payload = listing(331, [32342100], 15091)
+        payload["list"][0]["origin_name"] = None
+        rows, total = update.parse_listing(payload, 331)
+        self.assertEqual(total, 15091)
+        self.assertEqual(rows[0]["origin_name"], "")
+        self.assertEqual(update.parse_article(LEGACY, rows[0])["author"], "")
+
+    def test_empty_author_is_preserved(self):
+        row = entry(32342100)
+        row["origin_name"] = ""
+        self.assertEqual(update.normalize_entry(row)["origin_name"], "")
+
+    def test_missing_and_wrong_type_author_remain_invalid(self):
+        missing = entry(32342100)
+        del missing["origin_name"]
+        with self.assertRaisesRegex(update.FormatError, "missing origin_name"):
+            update.normalize_entry(missing)
+        for value in (False, 0, [], {}):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                    update.FormatError, "invalid origin_name"):
+                update.normalize_entry(dict(entry(32342100), origin_name=value))
 
     def test_unknown_listing_shapes_fail_closed(self):
         valid = listing(1, [1], 1)
@@ -91,7 +121,7 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(update.parse_listing(listing(1, [], 0), 1), ([], 0))
 
     def test_invalid_ids_and_missing_metadata(self):
-        for value in ("../1", "a", None, True, 1.5):
+        for value in ("../1", "a", None, True, 1.5, 0, "0"):
             with self.subTest(value=value), self.assertRaises(update.FormatError):
                 update.normalize_entry(dict(entry(1), article_id=value))
         with self.assertRaises(update.FormatError):
@@ -103,187 +133,210 @@ class WorkflowTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.directory = Path(self.temp.name)
-        self.known = {str(aid): minimal(aid) for aid in (3, 4, 5, 6, 99)}
-        self.original = copy.deepcopy(self.known)
-        update.write_json(self.directory / "result-min.json", self.known)
-        self.original_bytes = (self.directory / "result-min.json").read_bytes()
+        self.known_ids = (3, 4, 5, 6, 99)
+        corpus.create_articles(self.directory, [record(aid) for aid in self.known_ids])
+        self.original = {path.name: path.read_bytes()
+                         for path in (self.directory / "articles").iterdir()}
 
-    def test_incremental_refresh_and_idempotent_add_only_publish(self):
-        # Old page-number caches must never hide newly inserted articles.
-        update.write_json(self.directory / "api" / "1", [entry(99)])
+    def assert_existing_unchanged(self):
+        for name, content in self.original.items():
+            self.assertEqual((self.directory / "articles" / name).read_bytes(), content)
+
+    def test_incremental_update_stops_after_two_known_pages_and_is_idempotent(self):
         client = FakeClient()
-        entries = update.discover(self.directory, client, set(self.known))
+        summary, code = update.run_update(self.directory, client)
+        self.assertEqual(code, 0)
+        self.assertTrue(summary["complete"])
+        self.assertEqual(summary["stop_reason"], "two_known_pages")
+        self.assertEqual(summary["pages"], 3)
+        self.assertEqual(summary["missing"], 2)
+        self.assertEqual(summary["added"], 2)
         self.assertEqual(client.listing_calls, [1, 2, 3])
-        update.download(self.directory, client, entries, self.known)
         self.assertEqual(client.article_calls, ["8", "7"])
-        result = update.extract(self.directory, entries, self.known)
-        self.assertEqual(len(result), len(self.known) + 2)
-        for aid, old in self.original.items():
-            self.assertEqual(result[aid], old)
-        self.assertEqual(self.known, self.original)
-        self.assertIn("99", result)  # No longer listed upstream, never deleted locally.
-        saved = (self.directory / "result-min.json").read_bytes()
-        update.download(self.directory, client, entries, result)
-        update.extract(self.directory, entries, result)
-        self.assertEqual(client.article_calls, ["8", "7"])
-        self.assertEqual((self.directory / "result-min.json").read_bytes(), saved)
+        self.assertEqual(set(corpus.load_articles(self.directory)),
+                         {"3", "4", "5", "6", "7", "8", "99"})
+        self.assert_existing_unchanged()
 
-    def test_full_scan_infers_page_size_and_exact_multiple(self):
+        second = FakeClient()
+        again, code = update.run_update(self.directory, second)
+        self.assertEqual(code, 0)
+        self.assertEqual(again["added"], 0)
+        self.assertEqual(again["downloaded"], 0)
+        self.assertEqual(second.article_calls, [])
+        self.assert_existing_unchanged()
+
+    def test_full_scan_lists_every_page_but_fetches_only_missing(self):
         client = FakeClient()
-        entries = update.discover(self.directory, client, set(self.known), full_scan=True)
+        summary, code = update.run_update(self.directory, client, full_scan=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(summary["stop_reason"], "listing_exhausted")
+        self.assertEqual(summary["pages"], 4)
         self.assertEqual(client.listing_calls, [1, 2, 3, 4])
-        self.assertEqual(len(entries), 8)
+        self.assertEqual(client.article_calls, ["8", "7", "2", "1"])
+        self.assertEqual(summary["added"], 4)
 
-    def test_last_partial_page_and_overlap_deduplication(self):
-        client = FakeClient({1: listing(1, [8, 7], 5), 2: listing(2, [7, 6], 5),
-                             3: listing(3, [5], 5)})
-        entries = update.discover(self.directory, client, set(), full_scan=True)
-        self.assertEqual(len(entries), 4)
+    def test_variable_nonfinal_page_size_fails_closed_without_state_replacement(self):
+        update.write_json(update.state_path(self.directory), [entry(99)])
+        before = update.state_path(self.directory).read_bytes()
+        pages = {
+            1: listing(1, range(25, 15, -1), 25),
+            2: listing(2, range(15, 10, -1), 25),
+            3: listing(3, range(10, 5, -1), 25),
+        }
+        client = FakeClient(pages)
+        with self.assertRaisesRegex(update.FormatError, "page size changed"):
+            update.discover(self.directory, client, set(), full_scan=True)
+        self.assertEqual(client.listing_calls, [1, 2])
+        self.assertEqual(update.state_path(self.directory).read_bytes(), before)
+
+    def test_cross_page_overlap_is_counted_and_deduplicated(self):
+        pages = {1: listing(1, [8, 7], 5), 2: listing(2, [7, 6], 5),
+                 3: listing(3, [5], 5)}
+        result = update.discover(self.directory, FakeClient(pages), set(), full_scan=True)
+        self.assertEqual(result["listed"], 4)
+        self.assertEqual(result["overlaps"], 1)
+        self.assertTrue(result["complete"])
+
+    def test_conflicting_cross_page_metadata_fails(self):
+        second = listing(2, [7, 6], 4)
+        second["list"][0] = entry(7, title="different")
+        pages = {1: listing(1, [8, 7], 4), 2: second}
+        with self.assertRaisesRegex(update.FormatError, "Conflicting listing metadata"):
+            update.discover(self.directory, FakeClient(pages), set(), full_scan=True)
+
+    def test_repeated_page_and_moving_total_fail_without_state_replacement(self):
+        update.write_json(update.state_path(self.directory), [entry(99)])
+        before = update.state_path(self.directory).read_bytes()
+        cases = [
+            {1: listing(1, [8, 7]), 2: listing(2, [8, 7])},
+            {1: listing(1, [8, 7], 8), 2: listing(2, [6, 5], 9)},
+        ]
+        for pages in cases:
+            with self.subTest(pages=pages), self.assertRaises(update.FormatError):
+                update.discover(self.directory, FakeClient(pages), set(), full_scan=True)
+            self.assertEqual(update.state_path(self.directory).read_bytes(), before)
+
+    def test_page_limit_precedence_around_incremental_stop(self):
+        known = {"3", "4", "5", "6", "99"}
+        cases = (
+            (2, False, "page_limit", [1, 2]),
+            (3, False, "page_limit", [1, 2, 3]),
+            (4, True, "two_known_pages", [1, 2, 3]),
+        )
+        for cap, complete, reason, calls in cases:
+            with self.subTest(cap=cap):
+                client = FakeClient()
+                result = update.discover(
+                    self.directory, client, known, max_pages=cap)
+                self.assertEqual(result["complete"], complete)
+                self.assertEqual(result["stop_reason"], reason)
+                self.assertEqual(client.listing_calls, calls)
+
+    def test_natural_exhaustion_at_page_limit_is_complete(self):
+        pages = {
+            1: listing(1, [8, 7], 6),
+            2: listing(2, [6, 5], 6),
+            3: listing(3, [4, 3], 6),
+        }
+        client = FakeClient(pages)
+        result = update.discover(
+            self.directory, client, {"3", "4", "5", "6"}, max_pages=3)
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["stop_reason"], "listing_exhausted")
         self.assertEqual(client.listing_calls, [1, 2, 3])
 
-    def test_limit_is_explicit_and_old_entries_are_retained(self):
-        update.write_json(self.directory / "entries.json", [entry(99)])
+    def test_nonpositive_programmatic_page_limit_is_rejected_before_listing(self):
         client = FakeClient()
-        entries = update.discover(self.directory, client, set(), max_pages=1)
-        self.assertEqual(client.listing_calls, [1])
-        self.assertEqual(set(entries), {"99", "8", "7"})
+        for cap in (0, -1, False):
+            with self.subTest(cap=cap), self.assertRaisesRegex(
+                    update.FormatError, "positive integer"):
+                update.discover(self.directory, client, set(), max_pages=cap)
+        self.assertEqual(client.listing_calls, [])
 
-    def test_known_metadata_does_not_count_as_downloaded_article(self):
-        update.write_json(self.directory / "entries.json", [entry(8), entry(7)])
+    def test_page_limit_is_explicit_incomplete_and_does_not_publish(self):
         client = FakeClient()
-        update.discover(self.directory, client, set(self.known))
-        self.assertEqual(client.listing_calls, [1, 2, 3])
+        summary, code = update.run_update(self.directory, client, max_pages=1)
+        self.assertEqual(code, 1)
+        self.assertEqual(summary["status"], "incomplete")
+        self.assertFalse(summary["complete"])
+        self.assertEqual(summary["stop_reason"], "page_limit")
+        self.assertEqual(summary["pages"], 1)
+        self.assertEqual(client.article_calls, [])
+        self.assert_existing_unchanged()
 
-    def test_repeated_page_rejected_without_replacing_entries(self):
-        path = self.directory / "entries.json"
-        update.write_json(path, [entry(99)])
-        before = path.read_bytes()
-        client = FakeClient({1: listing(1, [8, 7]), 2: listing(2, [8, 7])})
-        with self.assertRaises(update.FormatError):
-            update.discover(self.directory, client, set())
-        self.assertEqual(path.read_bytes(), before)
+    def test_addition_limit_is_explicit_incomplete_before_download(self):
+        client = FakeClient()
+        summary, code = update.run_update(self.directory, client, max_additions=1)
+        self.assertEqual(code, 1)
+        self.assertFalse(summary["complete"])
+        self.assertEqual(summary["stop_reason"], "addition_limit")
+        self.assertEqual(summary["missing"], 2)
+        self.assertEqual(client.article_calls, [])
+        self.assert_existing_unchanged()
 
-    def test_invalid_cache_is_redownloaded(self):
-        path = self.directory / "articles" / "8"
+    def test_invalid_cache_is_refetched_outside_canonical_articles(self):
+        path = update.html_cache_path(self.directory, "8")
         update.atomic_write(path, "Access denied")
         client = FakeClient()
         with self.assertLogs(update.LOGGER, level="WARNING"):
-            update.download(self.directory, client, {"8": entry(8)}, self.known)
+            result = update.fetch_missing(self.directory, client, {"8": entry(8)}, {"3"})
         self.assertEqual(client.article_calls, ["8"])
+        self.assertEqual(result["downloaded"], 1)
         self.assertEqual(path.read_text(encoding="utf-8"), CURRENT)
-        update.download(self.directory, client, {"8": entry(8)}, self.known)
-        self.assertEqual(client.article_calls, ["8"])
-
-    def test_failed_download_does_not_cache_error_page(self):
-        with patch.object(FakeClient, "article", return_value="Blocked"):
-            with self.assertRaises(update.FormatError):
-                update.download(self.directory, FakeClient(), {"8": entry(8)}, self.known)
         self.assertFalse((self.directory / "articles" / "8").exists())
-        self.assertEqual((self.directory / "result-min.json").read_bytes(), self.original_bytes)
 
-    def test_missing_article_prevents_partial_publication(self):
-        update.atomic_write(self.directory / "articles" / "8", CURRENT)
-        with self.assertRaises(update.FormatError):
-            update.extract(self.directory, {"8": entry(8), "7": entry(7)}, self.known)
-        self.assertEqual((self.directory / "result-min.json").read_bytes(), self.original_bytes)
-
-    def test_full_output_seeds_archive_without_mutating_it(self):
-        archive_path = self.directory / "result-full.tgz"
-        rows = [record(aid) for aid in self.known]
-        payload = json.dumps(rows).encode()
-        with tarfile.open(archive_path, "w:gz") as archive:
-            info = tarfile.TarInfo("result.json")
-            info.size = len(payload)
-            archive.addfile(info, io.BytesIO(payload))
-        archive_bytes = archive_path.read_bytes()
-        update.atomic_write(self.directory / "articles" / "8", CURRENT)
-        update.extract(self.directory, {"8": entry(8)}, self.known, write_full=True)
-        full = update.read_json(self.directory / "result.json", None)
-        self.assertEqual(full[:-1], rows)
-        self.assertEqual(full[-1]["id"], "8")
-        self.assertEqual(archive_path.read_bytes(), archive_bytes)
-
-    def test_full_output_rejects_identical_duplicates_without_changing_loose_outputs(self):
-        rows = [record(aid) for aid in self.known]
-        rows.append(copy.deepcopy(rows[0]))
-        path = self.directory / "result.json"
-        update.write_json(path, rows)
-        full_bytes = path.read_bytes()
-        update.atomic_write(self.directory / "articles" / "8", CURRENT)
-
-        with self.assertRaisesRegex(update.FormatError, "Duplicate full corpus article ID"):
-            update.extract(self.directory, {"8": entry(8)}, self.known, write_full=True)
-
-        self.assertEqual(path.read_bytes(), full_bytes)
-        self.assertEqual((self.directory / "result-min.json").read_bytes(), self.original_bytes)
-
-    def test_full_output_rejects_integer_string_aliases_without_changing_archive_outputs(self):
-        first = record(3)
-        alias = copy.deepcopy(first)
-        alias["id"] = 3
-        payload = json.dumps([first, alias]).encode()
-        archive_path = self.directory / "result-full.tgz"
-        with tarfile.open(archive_path, "w:gz") as archive:
-            info = tarfile.TarInfo("result.json")
-            info.size = len(payload)
-            archive.addfile(info, io.BytesIO(payload))
-        archive_bytes = archive_path.read_bytes()
-        update.atomic_write(self.directory / "articles" / "8", CURRENT)
-
-        with self.assertRaisesRegex(update.FormatError, "Duplicate full corpus article ID 3"):
-            update.extract(self.directory, {"8": entry(8)}, self.known, write_full=True)
-
-        self.assertEqual(archive_path.read_bytes(), archive_bytes)
-        self.assertFalse((self.directory / "result.json").exists())
-        self.assertEqual((self.directory / "result-min.json").read_bytes(), self.original_bytes)
-
-    def test_full_output_missing_history_fails_before_publication(self):
-        update.atomic_write(self.directory / "articles" / "8", CURRENT)
-        with self.assertRaises(update.FormatError):
-            update.extract(self.directory, {"8": entry(8)}, self.known, write_full=True)
-        self.assertEqual((self.directory / "result-min.json").read_bytes(), self.original_bytes)
-
-    def test_full_output_after_minimal_only_update_uses_cached_html(self):
-        update.write_json(self.directory / "result.json", [record(aid) for aid in self.known])
-        update.atomic_write(self.directory / "articles" / "8", CURRENT)
-        known = update.extract(self.directory, {"8": entry(8)}, self.known)
-        update.extract(self.directory, {"8": entry(8)}, known, write_full=True)
-        full = {row["id"]: row for row in update.read_json(self.directory / "result.json", [])}
-        self.assertEqual(set(full), set(known))
-        self.assertEqual(full["8"]["text"], known["8"]["text"])
-
-    def test_legacy_empty_text_and_author_are_preserved(self):
-        self.known["99"]["text"] = []
-        self.known["99"]["author"] = ""
-        update.write_json(self.directory / "result-min.json", self.known)
-        self.assertEqual(update.load_corpus(self.directory), self.known)
-        update.atomic_write(self.directory / "articles" / "8", CURRENT)
-        result = update.extract(self.directory, {"8": entry(8)}, self.known)
-        self.assertEqual(result["99"], self.known["99"])
-
-    def test_directory_lock_rejects_second_writer_and_releases_on_error(self):
-        with self.assertRaises(RuntimeError):
-            with update.corpus_lock(self.directory):
-                with self.assertRaises(update.FormatError):
-                    with update.corpus_lock(self.directory):
-                        self.fail("Second writer acquired the lock")
-                raise RuntimeError("interrupted")
+    def test_updater_lock_precedes_discovery_and_releases_on_success_and_failure(self):
+        blocked = FakeClient()
+        with corpus.writer_lock(self.directory):
+            with self.assertRaisesRegex(corpus.CorpusError, "another writer"):
+                update.run_update(self.directory, blocked)
+        self.assertEqual(blocked.listing_calls, [])
+        self.assertFalse(update.state_path(self.directory).exists())
         self.assertFalse((self.directory / ".update.lock").exists())
-        with update.corpus_lock(self.directory):
-            self.assertTrue((self.directory / ".update.lock").exists())
 
-    def test_atomic_replace_failure_keeps_destination_and_cleans_temp(self):
-        path = self.directory / "result-min.json"
+        successful = FakeClient()
+        summary, code = update.run_update(self.directory, successful)
+        self.assertEqual((code, summary["status"]), (0, "success"))
+        self.assertFalse((self.directory / ".update.lock").exists())
+
+        interrupted = FakeClient({1: KeyboardInterrupt()})
+        with self.assertRaises(KeyboardInterrupt):
+            update.run_update(self.directory, interrupted)
+        self.assertFalse((self.directory / ".update.lock").exists())
+
+    def test_network_failure_after_one_download_publishes_nothing_but_keeps_cache(self):
+        client = FakeClient(articles={"7": URLError("offline")})
+        with self.assertRaises(URLError):
+            update.run_update(self.directory, client)
+        self.assertTrue(update.html_cache_path(self.directory, "8").exists())
+        self.assertFalse(update.html_cache_path(self.directory, "7").exists())
+        self.assertFalse((self.directory / "articles" / "8.json").exists())
+        self.assert_existing_unchanged()
+        self.assertFalse((self.directory / ".update.lock").exists())
+
+    def test_malformed_article_after_valid_download_publishes_nothing(self):
+        client = FakeClient(articles={"7": "<h1>Blocked</h1>"})
+        with self.assertRaises(update.FormatError):
+            update.run_update(self.directory, client)
+        self.assertTrue(update.html_cache_path(self.directory, "8").exists())
+        self.assertFalse((self.directory / "articles" / "8.json").exists())
+        self.assert_existing_unchanged()
+
+    def test_state_is_ignored_and_duplicate_checked(self):
+        update.write_json(update.state_path(self.directory), [entry(8), entry("08")])
+        with self.assertRaisesRegex(update.FormatError, "Duplicate article ID 8"):
+            update.load_entries(self.directory)
+        self.assertFalse((self.directory / "entries.json").exists())
+
+    def test_atomic_replace_failure_keeps_cache_destination(self):
+        path = update.state_path(self.directory)
+        update.write_json(path, [entry(1)])
+        before = path.read_bytes()
         with patch.object(update.os, "replace", side_effect=OSError("disk full")):
             with self.assertRaises(OSError):
-                update.write_json(path, {})
-        self.assertEqual(path.read_bytes(), self.original_bytes)
-        self.assertFalse(list(self.directory.glob(".result-min.json*")))
-
-    def test_malformed_local_corpus_is_not_treated_as_empty(self):
-        update.write_json(self.directory / "result-min.json", [])
-        with self.assertRaises(update.FormatError):
-            update.load_corpus(self.directory)
+                update.write_json(path, [])
+        self.assertEqual(path.read_bytes(), before)
+        self.assertFalse(list(path.parent.glob(".entries.json*")))
 
 
 class ClientAndCliTests(unittest.TestCase):
@@ -325,26 +378,36 @@ class ClientAndCliTests(unittest.TestCase):
             with self.assertRaises(update.FormatError):
                 update.Client().listing(1)
 
-    def test_cli_failure_returns_nonzero(self):
-        with tempfile.TemporaryDirectory() as directory:
-            with self.assertLogs(update.LOGGER, level="ERROR"):
-                self.assertEqual(update.main(["extract", "--data-dir", directory]), 1)
+    def test_cli_requires_explicit_data_dir(self):
+        with self.assertRaises(SystemExit) as raised:
+            update.main([])
+        self.assertEqual(raised.exception.code, 2)
 
-    def test_canonical_cli_offers_help_without_network_or_cwd_dependency(self):
+    def test_cli_rejects_zero_page_limit(self):
+        with self.assertRaises(SystemExit) as raised:
+            update.main(["--data-dir", "/tmp/unused", "--max-pages", "0"])
+        self.assertEqual(raised.exception.code, 2)
+
+    def test_cli_emits_machine_readable_success_and_incomplete_reports(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = FakeClient({1: listing(1, [], 0)})
+            stdout = io.StringIO()
+            with patch.object(update, "Client", return_value=client), patch("sys.stdout", stdout):
+                code = update.main(["--data-dir", directory, "--max-pages", "1"])
+            self.assertEqual(code, 0)
+            report = json.loads(stdout.getvalue())
+            self.assertEqual(report["status"], "success")
+            self.assertTrue(report["complete"])
+            self.assertEqual(report["pages"], 1)
+            self.assertEqual(report["records"], 0)
+
+    def test_cli_help_has_no_cwd_dependency(self):
         command = Path(update.__file__)
         result = subprocess.run([sys.executable, str(command), "--help"], cwd="/",
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("--log-level", result.stdout)
-
-    def test_cli_extract_mode_and_case_insensitive_log_level(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory)
-            update.write_json(path / "entries.json", [entry(1)])
-            update.atomic_write(path / "articles" / "1", LEGACY)
-            self.assertEqual(update.main(["extract", "--data-dir", directory,
-                                          "--log-level", "warning", "--retries", "0"]), 0)
-            self.assertEqual(set(update.load_corpus(path)), {"1"})
+        self.assertIn("--max-additions", result.stdout)
+        self.assertIn("--data-dir", result.stdout)
 
 
 if __name__ == "__main__":

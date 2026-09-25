@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/abusetelegram/xixi-haha/blob/data/schema.json",
+  "title": "xixi-haha canonical article",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "title",
+    "date",
+    "author",
+    "editor",
+    "article",
+    "text"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*$"
+    },
+    "title": {
+      "type": "string"
+    },
+    "date": {
+      "type": "string"
+    },
+    "author": {
+      "type": "string"
+    },
+    "editor": {
+      "type": "string"
+    },
+    "article": {
+      "type": "string"
+    },
+    "text": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

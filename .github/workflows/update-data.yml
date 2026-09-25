@@ -1,0 +1,293 @@
+name: update article data
+
+on:
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Acquisition mode, or retry exports from an exact data commit
+        required: true
+        type: choice
+        default: incremental
+        options:
+          - incremental
+          - full
+          - export-only
+      dry_run:
+        description: Validate acquisition without committing, pushing, exporting, or building
+        required: true
+        type: boolean
+        default: true
+      data_sha:
+        description: Exact lowercase 40-hex data commit (required only for export-only)
+        required: false
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: article-data-publication
+  cancel-in-progress: false
+
+jobs:
+  update_data:
+    name: acquire, validate, and publish additions
+    if: >-
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      (github.event_name == 'schedule' ||
+       (github.event_name == 'workflow_dispatch' && inputs.mode != 'export-only'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    permissions:
+      contents: write
+    outputs:
+      data_sha: ${{ steps.publish.outputs.data_sha }}
+      changed: ${{ steps.publish.outputs.changed }}
+    steps:
+      - name: Check out exact source commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: code
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Require the bootstrapped data branch
+        working-directory: code
+        run: |
+          set -euo pipefail
+          if ! git ls-remote --exit-code origin refs/heads/data >/dev/null; then
+            echo 'The data branch must be bootstrapped and published before this workflow can run.' >&2
+            exit 1
+          fi
+
+      - name: Check out data branch separately
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: data
+          ref: data
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: '0.12.18'
+          enable-cache: true
+          cache-dependency-glob: code/uv.lock
+
+      - name: Synchronize locked dependencies
+        working-directory: code
+        run: |
+          uv python install '3.13'
+          uv sync --locked --python '3.13'
+
+      - name: Validate starting corpus and capture its commit
+        id: start
+        working-directory: code
+        run: |
+          set -euo pipefail
+          uv run --frozen --python '3.13' python parse/corpus.py validate --data-dir "$GITHUB_WORKSPACE/data"
+          data_sha="$(git -C "$GITHUB_WORKSPACE/data" rev-parse HEAD)"
+          test "$(git -C "$GITHUB_WORKSPACE/data" branch --show-current)" = data
+          printf 'data_sha=%s\n' "$data_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Run bounded complete acquisition
+        id: acquire
+        working-directory: code
+        env:
+          MODE: ${{ github.event_name == 'schedule' && 'incremental' || inputs.mode }}
+        run: |
+          set -euo pipefail
+          args=(
+            update --data-dir "$GITHUB_WORKSPACE/data"
+            --timeout 30 --retries 3
+          )
+          case "$MODE" in
+            incremental)
+              args+=(--delay 1 --max-pages 50 --max-additions 200)
+              ;;
+            full)
+              args+=(--delay 2.1 --full-scan --max-pages 2000 --max-additions 5000)
+              ;;
+            *)
+              echo "Unsupported acquisition mode: $MODE" >&2
+              exit 2
+              ;;
+          esac
+          uv run --frozen --python '3.13' python parse/update.py "${args[@]}" | tee "$RUNNER_TEMP/update-report.json"
+
+      - name: Validate Git delta, commit additions, and normally push
+        id: publish
+        working-directory: code
+        env:
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+          START_DATA_SHA: ${{ steps.start.outputs.data_sha }}
+          SOURCE_SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          git -C "$GITHUB_WORKSPACE/data" config user.name 'github-actions[bot]'
+          git -C "$GITHUB_WORKSPACE/data" config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          args=(
+            publish --data-dir "$GITHUB_WORKSPACE/data"
+            --report "$RUNNER_TEMP/update-report.json"
+            --start-sha "$START_DATA_SHA"
+            --source-sha "$SOURCE_SHA"
+            --run-url "$RUN_URL"
+          )
+          if [[ "$DRY_RUN" == 'true' ]]; then
+            args+=(--dry-run)
+          fi
+          uv run --frozen --python '3.13' python scripts/data_pipeline.py "${args[@]}" > "$RUNNER_TEMP/publication.json"
+          cat "$RUNNER_TEMP/publication.json"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          result = json.loads(Path(os.environ["RUNNER_TEMP"], "publication.json").read_text())
+          published = result["status"] == "published"
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("data_sha={}\n".format(result["data_sha"]))
+              output.write("changed={}\n".format(str(published).lower()))
+          PY
+
+  resolve_export_only:
+    name: validate export-only data commit
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.mode == 'export-only' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      data_sha: ${{ steps.verify.outputs.data_sha }}
+    steps:
+      - name: Validate exact SHA input
+        env:
+          DATA_SHA: ${{ inputs.data_sha }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          if [[ "$DRY_RUN" == 'true' ]]; then
+            echo 'dry_run is not meaningful with export-only; clear it and retry.' >&2
+            exit 2
+          fi
+          if [[ ! "$DATA_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'export-only requires an exact lowercase 40-hex data_sha.' >&2
+            exit 2
+          fi
+
+      - name: Check out exact source commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: code
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Check out requested data commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: data
+          ref: ${{ inputs.data_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require commit to belong to the published data branch
+        id: verify
+        env:
+          DATA_SHA: ${{ inputs.data_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C data rev-parse HEAD)" = "$DATA_SHA"
+          git -C data fetch --no-tags origin refs/heads/data:refs/remotes/origin/data
+          git -C data merge-base --is-ancestor "$DATA_SHA" refs/remotes/origin/data
+          printf 'data_sha=%s\n' "$DATA_SHA" >> "$GITHUB_OUTPUT"
+
+  export:
+    name: build downloadable exports from exact data commit
+    needs:
+      - update_data
+      - resolve_export_only
+    if: >-
+      always() && !cancelled() &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+      ((needs.update_data.result == 'success' && needs.update_data.outputs.changed == 'true') ||
+       needs.resolve_export_only.result == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      DATA_SHA: ${{ needs.update_data.outputs.data_sha || needs.resolve_export_only.outputs.data_sha }}
+    steps:
+      - name: Check out exact source commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: code
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Check out exact data commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: data
+          ref: ${{ env.DATA_SHA }}
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: '0.12.18'
+          enable-cache: true
+          cache-dependency-glob: code/uv.lock
+
+      - name: Synchronize locked dependencies
+        working-directory: code
+        run: |
+          uv python install '3.13'
+          uv sync --locked --python '3.13'
+
+      - name: Generate and validate aggregate JSON, TGZ, and provenance
+        working-directory: code
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ github.sha }}"
+          test "$(git -C "$GITHUB_WORKSPACE/data" rev-parse HEAD)" = "$DATA_SHA"
+          uv run --frozen --python '3.13' python scripts/data_pipeline.py export \
+            --code-dir "$GITHUB_WORKSPACE/code" \
+            --data-dir "$GITHUB_WORKSPACE/data" \
+            --output-dir "$RUNNER_TEMP/article-data-exports" \
+            --code-sha "${{ github.sha }}" \
+            --data-sha "$DATA_SHA"
+
+      - name: Upload exact-SHA downloadable exports
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: article-data-${{ env.DATA_SHA }}
+          path: |
+            ${{ runner.temp }}/article-data-exports/result-min.json
+            ${{ runner.temp }}/article-data-exports/result.json
+            ${{ runner.temp }}/article-data-exports/result-full.tgz
+            ${{ runner.temp }}/article-data-exports/provenance.json
+          if-no-files-found: error
+          retention-days: 14
+
+  telegram:
+    name: publish Telegram image from the same data commit
+    needs:
+      - update_data
+      - export
+    if: >-
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+      needs.update_data.outputs.changed == 'true' && needs.export.result == 'success'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/docker-telegram.yml
+    with:
+      source_sha: ${{ github.sha }}
+      data_sha: ${{ needs.update_data.outputs.data_sha }}
+    secrets:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
