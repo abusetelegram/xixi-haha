@@ -5,6 +5,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 UPDATE = (ROOT / ".github/workflows/update-data.yml").read_text(encoding="utf-8")
 DOCKER = (ROOT / ".github/workflows/docker-telegram.yml").read_text(encoding="utf-8")
+README = (ROOT / "parse/README.md").read_text(encoding="utf-8")
 REPOSITORY = "abusetelegram/xixi-haha"
 DEFAULT_REF = "refs/heads/master"
 SOURCE_SHA = "a" * 40
@@ -86,6 +87,12 @@ class WorkflowTrustTests(unittest.TestCase):
             UPDATE,
         )
         self.assertIn("args+=(--delay 1 --max-pages 50 --max-additions 200)", UPDATE)
+        self.assertIn(
+            '--data-dir "$DATA" --full-scan \\\n'
+            '  --max-pages 2000 --max-additions 5000 \\\n'
+            '  --delay 2.1 --timeout 30 --retries 3',
+            README,
+        )
 
 
 if __name__ == "__main__":

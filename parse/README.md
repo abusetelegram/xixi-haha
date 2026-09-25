@@ -71,7 +71,7 @@ uv run --locked python parse/update.py update \
 uv run --locked python parse/update.py update \
   --data-dir "$DATA" --full-scan \
   --max-pages 2000 --max-additions 5000 \
-  --delay 1 --timeout 30 --retries 3
+  --delay 2.1 --timeout 30 --retries 3
 
 uv run --locked python parse/corpus.py validate --data-dir "$DATA"
 ```
