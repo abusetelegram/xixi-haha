@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -106,6 +107,51 @@ def _require_remote_data_sha(directory: Path, expected_sha: str) -> None:
                 expected_sha, remote_sha))
 
 
+def _validated_new_article(path: Path, expected_id: str) -> bytes:
+    try:
+        raw = path.read_bytes()
+        text = raw.decode("utf-8")
+        record = json.loads(text)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise PipelineError("Cannot validate new article {}: {}".format(path, exc)) from exc
+    validated = corpus.canonical_record(record, strict_content=True)
+    if validated["id"] != expected_id:
+        raise PipelineError("Filename/record ID mismatch for {}".format(path.name))
+    if raw != corpus.serialize_record(validated, strict_content=True):
+        raise PipelineError("New article {} is not deterministic LF pretty JSON".format(path.name))
+    return raw
+
+
+def _staged_bytes(directory: Path, path: str) -> bytes:
+    return _git(directory, "show", ":" + path).stdout.encode("utf-8")
+
+
+def _materialize_commit(directory: Path, sha: str, destination: Path) -> None:
+    try:
+        archive = subprocess.run(
+            ["git", "-C", str(directory), "archive", "--format=tar", sha],
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ).stdout
+        destination.mkdir()
+        subprocess.run(
+            ["tar", "-xf", "-", "-C", str(destination)], input=archive,
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+    except (subprocess.CalledProcessError, OSError) as exc:
+        detail = getattr(exc, "stderr", b"")
+        if isinstance(detail, bytes):
+            detail = detail.decode("utf-8", errors="replace")
+        raise PipelineError(detail.strip() or "Cannot materialize exact data commit") from exc
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
 def publish_changes(data_dir: Path, report_path: Path, start_sha: str, source_sha: str,
                     run_url: str, dry_run: bool = False) -> dict:
     """Validate updater output, then commit and normally push additions only."""
@@ -133,6 +179,10 @@ def publish_changes(data_dir: Path, report_path: Path, start_sha: str, source_sh
         raise PipelineError("Validated corpus count does not match updater report")
     if len(additions) != report["added"]:
         raise PipelineError("New article count does not match updater report")
+    validated_additions = {
+        path: _validated_new_article(data / path, ARTICLE_RE.fullmatch(path).group(1))
+        for path in additions
+    }
 
     _require_remote_data_sha(data, start_sha)
     if dry_run:
@@ -149,14 +199,27 @@ def publish_changes(data_dir: Path, report_path: Path, start_sha: str, source_sh
     _git(data, "add", "--", *additions)
     staged = _git(data, "diff", "--cached", "--name-status").stdout.splitlines()
     expected = ["A\t" + path for path in additions]
-    if sorted(staged) != sorted(expected):
+    if (sorted(staged) != sorted(expected)
+            or any(_staged_bytes(data, path) != validated_additions[path] for path in additions)):
+        _git(data, "reset", "--", *additions)
         raise PipelineError("Staged data is not exactly the validated article additions")
     _git(data, "diff", "--cached", "--check")
+    if _git(data, "rev-parse", "HEAD").stdout.strip() != start_sha:
+        _git(data, "reset", "--", *additions)
+        raise PipelineError("Data checkout moved before commit")
+    expected_tree = _exact_sha(_git(data, "write-tree").stdout.strip(), "validated data tree")
 
     subject = "Add {} article{}".format(len(additions), "" if len(additions) == 1 else "s")
     body = "Source-Code-SHA: {}\nWorkflow-Run: {}".format(source_sha, run_url)
-    _git(data, "commit", "-m", subject, "-m", body)
-    new_sha = _exact_sha(_git(data, "rev-parse", "HEAD").stdout.strip(), "new data SHA")
+    new_sha = _exact_sha(
+        _git(data, "commit-tree", expected_tree, "-p", start_sha,
+             "-m", subject, "-m", body).stdout.strip(),
+        "new data SHA",
+    )
+    _git(data, "update-ref", "-m", subject, "HEAD", new_sha, start_sha)
+    if (_git(data, "rev-parse", "HEAD^").stdout.strip() != start_sha
+            or _git(data, "rev-parse", "HEAD^{tree}").stdout.strip() != expected_tree):
+        raise PipelineError("Committed data does not match the validated tree and base")
 
     # This explicit preflight gives a clear error.  The normal, non-forced push
     # remains the authoritative race guard if the remote advances afterwards.
@@ -180,6 +243,8 @@ def export_exact(code_dir: Path, data_dir: Path, output_dir: Path, code_sha: str
     if requested_output.is_symlink() or requested_output.exists():
         raise PipelineError("Export output directory must not already exist or be a symlink")
     output = requested_output.resolve()
+    if _is_relative_to(output, data):
+        raise PipelineError("Export output directory must be outside the data checkout")
     code_sha = _exact_sha(code_sha, "code SHA")
     data_sha = _exact_sha(data_sha, "data SHA")
     if _git(code, "rev-parse", "HEAD").stdout.strip() != code_sha:
@@ -191,10 +256,13 @@ def export_exact(code_dir: Path, data_dir: Path, output_dir: Path, code_sha: str
     if _status_entries(data):
         raise PipelineError("Exact data checkout must be clean before export")
     try:
-        return export_function(
-            data, output, include_full=not minimal_only,
-            include_archive=not minimal_only, code_sha=code_sha, data_sha=data_sha,
-        )
+        with tempfile.TemporaryDirectory(prefix="data-pipeline-export-") as temporary:
+            snapshot = Path(temporary) / "data"
+            _materialize_commit(data, data_sha, snapshot)
+            return export_function(
+                snapshot, output, include_full=not minimal_only,
+                include_archive=not minimal_only, code_sha=code_sha, data_sha=data_sha,
+            )
     except Exception as exc:
         shutil.rmtree(output, ignore_errors=True)
         if isinstance(exc, PipelineError):
