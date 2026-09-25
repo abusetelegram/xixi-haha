@@ -151,6 +151,34 @@ class ExportTests(unittest.TestCase):
         self.assertFalse((target / "nested").exists())
         self.assertEqual(sentinel.read_bytes(), b"keep me\n")
 
+    def test_output_equal_to_common_live_symlink_preserves_target(self):
+        target = self.base / "target"
+        data = target / "data"
+        corpus.create_articles(data, [full_record("1")])
+        sentinel = target / exporter.MINIMAL_NAME
+        sentinel.write_bytes(b"keep me\n")
+        output = self.base / "output-link"
+        output.symlink_to(target, target_is_directory=True)
+
+        with self.assertRaisesRegex(exporter.ExportError, "symlinks"):
+            exporter.export_corpus(output / "data", output)
+
+        self.assertTrue(output.is_symlink())
+        self.assertEqual(output.readlink(), target)
+        self.assertEqual(sentinel.read_bytes(), b"keep me\n")
+
+    def test_output_equal_to_common_dangling_symlink_preserves_link(self):
+        missing_target = self.base / "missing-target"
+        output = self.base / "dangling-output"
+        output.symlink_to(missing_target, target_is_directory=True)
+
+        with self.assertRaisesRegex(exporter.ExportError, "symlinks"):
+            exporter.export_corpus(output / "data", output)
+
+        self.assertTrue(output.is_symlink())
+        self.assertEqual(output.readlink(), missing_target)
+        self.assertFalse(missing_target.exists())
+
     def test_dangling_output_symlink_is_rejected_without_replacing_link(self):
         corpus.create_articles(self.data, [full_record("1")])
         missing_target = self.base / "missing-target"

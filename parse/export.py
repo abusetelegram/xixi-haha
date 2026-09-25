@@ -45,6 +45,8 @@ def _absolute_lexical(path: Path) -> Path:
 
 def _contains_output_symlink(data: Path, output: Path) -> bool:
     """Check output-only path components without rejecting shared system aliases."""
+    if output.is_symlink():
+        return True
     common = Path(os.path.commonpath((str(data), str(output))))
     candidate = common
     for part in output.relative_to(common).parts:
