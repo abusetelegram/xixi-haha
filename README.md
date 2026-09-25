@@ -32,8 +32,10 @@ Telegram Bot: [@xixi_haha_bot](https://t.me/xixi_haha_bot)
 - [下载整个 data 分支](https://github.com/abusetelegram/xixi-haha/archive/refs/heads/data.zip)
 - [查看数据更新和可下载聚合文件](https://github.com/abusetelegram/xixi-haha/actions/workflows/update-data.yml)（成功运行的 Actions artifact 包含 minimal/full JSON、TGZ 和 provenance）
 
-GitHub Pages 是可选展示入口，不是数据读取前提。仓库中的旧
-`parse/result-min.json` 和 `parse/result-full.tgz` 暂时保留用于首次导入和兼容；验证新流程后再单独决定移除。`parse/v1/xi.json` 与 `web/` 的旧数组格式保持不变。
+GitHub Pages 是可选展示入口，不是数据读取前提。旧的
+`master/parse/result-min.json`、`master/parse/result-full.tgz` 和整个
+`master/parse/v1/` 原始路径已明确移除；请从 `data` 分支读取规范的逐文章 JSON，或从指定
+DATA commit 对应的成功 Actions 运行下载 v2 聚合导出。旧的 Web/Telegram 应用需要基于新数据源重建；本次清理未改动其实现代码，也不保证现有应用可继续使用已删除的数据路径。
 
 ## 更新数据
 
@@ -49,7 +51,7 @@ uv run --locked python parse/corpus.py validate \
   --data-dir /absolute/path/to/xixi-haha-data
 ```
 
-每周自动流程只新增文章，遇到不完整扫描、已有文章变化、删除、推送竞争或导出失败都会停止。聚合文件由精确的 data commit 生成并作为 GitHub Actions artifact 提供，不提交到 data 分支。
+每周自动流程默认从最新列表页开始增量扫描，在连续两个页面都只含已有文章时停止；全量扫描仅用于显式、人工监督的可选核对。流程只新增文章，遇到不完整扫描、已有文章变化、删除、推送竞争或导出失败都会停止。聚合文件由精确的 data commit 生成并作为 GitHub Actions artifact 提供，不提交到 data 分支。
 
 ## Web服务
 

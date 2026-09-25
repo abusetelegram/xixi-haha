@@ -31,41 +31,18 @@ spans discovery, cache/state writes, downloads, and publication. Generated
 aggregates must be written outside the data checkout and must not be committed
 to `data`.
 
-## Initial local import
-
-Use separate code and data worktrees. The import is idempotent and validates the
-legacy full/minimal projection before publishing any canonical article:
-
-```sh
-CODE=/absolute/path/to/xixi-haha-code
-DATA=/absolute/path/to/xixi-haha-data
-
-cd "$CODE"
-uv run --locked python parse/corpus.py import-legacy \
-  --archive parse/result-full.tgz \
-  --minimal parse/result-min.json \
-  --data-dir "$DATA"
-uv run --locked python parse/corpus.py validate \
-  --data-dir "$DATA" \
-  --archive parse/result-full.tgz \
-  --minimal parse/result-min.json
-```
-
-The fixed bootstrap inputs are SHA-256
-`41db9865a5b5bbb907aea5fd814bbbabdb9ccf18e0614c7f2b0d28156e12c607`
-for `result-full.tgz` and
-`79468406fb3594807af95208686c2b23bc8d4aa0fc685d386f55e21416be461c`
-for `result-min.json`.
-
-## Incremental and full catch-up
+## Routine incremental and optional full reconciliation
 
 The updater prints one JSON report. `update` is its only mode and is also the
 default positional command. Publication requires exit status 0 and
-`"complete": true`; argument errors exit 2 and interruption exits 130. Weekly
-incremental discovery starts at page 1 and stops after two wholly known pages.
-A full scan lists every advertised page but still fetches only IDs absent from
-the canonical store. Requests are sequential; `--delay`, `--timeout`, and
-`--retries` configure pacing and bounded transient retries.
+`"complete": true`; argument errors exit 2 and interruption exits 130. The
+normal weekly incremental run starts at the newest listing edge (page 1) and
+stops after two wholly known pages. This depends on the upstream newest-first
+listing contract; it is not a completeness proof for older or backdated gaps.
+A full scan is an explicit, supervised reconciliation option, never the routine
+default, and still fetches only IDs absent from the canonical store. Requests
+are sequential; `--delay`, `--timeout`, and `--retries` configure pacing and
+bounded transient retries.
 
 ```sh
 # Routine incremental run with finite production guards.
@@ -194,13 +171,22 @@ storage service is required. The repository owner may optionally select the
 `data` branch/root in GitHub Pages settings; repository article files and the
 branch archive remain the primary distribution.
 
-## Compatibility and cutover
+## Compatibility and completed cutover
 
-The checked-in `parse/result-min.json` and `parse/result-full.tgz` remain
-**temporarily** on the code branch to bootstrap the data branch and avoid
-breaking old raw URLs. Remove them only in a later explicit cutover after data
-publication and consumer verification. `parse/v1/xi.json` and `web/` are a
-separate legacy flat-array contract and remain unchanged.
+Canonical files now live only on the `data` branch. Aggregates are generated
+outside that checkout from an exact DATA commit and distributed as Actions
+artifacts. The historical raw code-branch paths
+`parse/result-min.json`, `parse/result-full.tgz`, and the entire `parse/v1/`
+directory were intentionally removed; consumers must use canonical article
+files or an exact-commit v2 export.
+
+`parse/corpus.py import-legacy` remains a generic, explicit-input migration tool
+and its tests use small offline fixtures. If historical migration investigation
+is necessary, retrieve old inputs explicitly from a pre-cutover Git commit into
+a temporary directory; do not restore or commit those large duplicate blobs.
+The legacy Web and Telegram applications are obsolete and await rebuilding
+against the current data source. Their implementation code is unchanged by this
+cleanup, and no compatibility with the removed dataset paths is promised.
 
 The Telegram container consumes the v2 ID-keyed minimal projection. Its workflow
 now generates that projection from an explicit data commit instead of copying a
