@@ -215,6 +215,10 @@ def discover(directory: Path, client, known, full_scan: bool = False,
     incomplete report rather than claiming synchronization.
     """
     directory = Path(directory)
+    if (max_pages is not None
+            and (isinstance(max_pages, bool) or not isinstance(max_pages, int)
+                 or max_pages <= 0)):
+        raise FormatError("max_pages must be a positive integer")
     known_ids = set(known)
     retained = load_entries(directory)
     fresh = {}
@@ -263,12 +267,17 @@ def discover(directory: Path, client, known, full_scan: bool = False,
                 fresh[aid] = row
         write_json(api_cache_path(directory, page), rows)
         known_pages = known_pages + 1 if ids and ids <= known_ids else 0
-        if not full_scan and known_pages >= 2:
-            stop_reason = "two_known_pages"
+        # Exhausting the advertised listing is complete even when it lands
+        # exactly on the configured cap.  Otherwise the cap takes precedence
+        # over the incremental heuristic at that same page.
+        if page >= page_count:
             break
-        if max_pages is not None and page >= max_pages and page < page_count:
+        if max_pages is not None and page >= max_pages:
             complete = False
             stop_reason = "page_limit"
+            break
+        if not full_scan and known_pages >= 2:
+            stop_reason = "two_known_pages"
             break
         page += 1
 

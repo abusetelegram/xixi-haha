@@ -193,6 +193,43 @@ class WorkflowTests(unittest.TestCase):
                 update.discover(self.directory, FakeClient(pages), set(), full_scan=True)
             self.assertEqual(update.state_path(self.directory).read_bytes(), before)
 
+    def test_page_limit_precedence_around_incremental_stop(self):
+        known = {"3", "4", "5", "6", "99"}
+        cases = (
+            (2, False, "page_limit", [1, 2]),
+            (3, False, "page_limit", [1, 2, 3]),
+            (4, True, "two_known_pages", [1, 2, 3]),
+        )
+        for cap, complete, reason, calls in cases:
+            with self.subTest(cap=cap):
+                client = FakeClient()
+                result = update.discover(
+                    self.directory, client, known, max_pages=cap)
+                self.assertEqual(result["complete"], complete)
+                self.assertEqual(result["stop_reason"], reason)
+                self.assertEqual(client.listing_calls, calls)
+
+    def test_natural_exhaustion_at_page_limit_is_complete(self):
+        pages = {
+            1: listing(1, [8, 7], 6),
+            2: listing(2, [6, 5], 6),
+            3: listing(3, [4, 3], 6),
+        }
+        client = FakeClient(pages)
+        result = update.discover(
+            self.directory, client, {"3", "4", "5", "6"}, max_pages=3)
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["stop_reason"], "listing_exhausted")
+        self.assertEqual(client.listing_calls, [1, 2, 3])
+
+    def test_nonpositive_programmatic_page_limit_is_rejected_before_listing(self):
+        client = FakeClient()
+        for cap in (0, -1, False):
+            with self.subTest(cap=cap), self.assertRaisesRegex(
+                    update.FormatError, "positive integer"):
+                update.discover(self.directory, client, set(), max_pages=cap)
+        self.assertEqual(client.listing_calls, [])
+
     def test_page_limit_is_explicit_incomplete_and_does_not_publish(self):
         client = FakeClient()
         summary, code = update.run_update(self.directory, client, max_pages=1)
@@ -321,6 +358,11 @@ class ClientAndCliTests(unittest.TestCase):
     def test_cli_requires_explicit_data_dir(self):
         with self.assertRaises(SystemExit) as raised:
             update.main([])
+        self.assertEqual(raised.exception.code, 2)
+
+    def test_cli_rejects_zero_page_limit(self):
+        with self.assertRaises(SystemExit) as raised:
+            update.main(["--data-dir", "/tmp/unused", "--max-pages", "0"])
         self.assertEqual(raised.exception.code, 2)
 
     def test_cli_emits_machine_readable_success_and_incomplete_reports(self):
