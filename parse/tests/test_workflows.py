@@ -20,6 +20,27 @@ def update_context_is_trusted(event, ref, mode):
     )
 
 
+def acquisition_limits(event, mode, max_pages="50", max_additions="200"):
+    if event == "schedule":
+        raw = ("50", "200")
+    elif mode == "incremental":
+        raw = (max_pages, max_additions)
+    elif mode == "full":
+        raw = ("2000", "5000")
+    else:
+        raise ValueError("not an acquisition mode")
+    values = []
+    for name, value, upper in zip(
+            ("max_pages", "max_additions"), raw, (2000, 5000)):
+        if not value.isascii() or not value.isdecimal():
+            raise ValueError(f"{name} must be a positive decimal integer")
+        parsed = int(value)
+        if not 1 <= parsed <= upper:
+            raise ValueError(f"{name} out of range")
+        values.append(parsed)
+    return tuple(values)
+
+
 def docker_context_is_trusted(event, ref, workflow_ref, source_sha="", data_sha=""):
     if ref != DEFAULT_REF:
         return False
@@ -69,6 +90,33 @@ class WorkflowTrustTests(unittest.TestCase):
                     docker_context_is_trusted(event, ref, workflow_ref, source_sha, data_sha),
                 )
 
+    def test_manual_incremental_limit_matrix(self):
+        self.assertEqual(acquisition_limits("schedule", "incremental", "999", "999"),
+                         (50, 200))
+        self.assertEqual(acquisition_limits("workflow_dispatch", "incremental"),
+                         (50, 200))
+        self.assertEqual(
+            acquisition_limits("workflow_dispatch", "incremental", "1200", "3456"),
+            (1200, 3456),
+        )
+        self.assertEqual(
+            acquisition_limits("workflow_dispatch", "full", "1", "1"),
+            (2000, 5000),
+        )
+        for pages, additions in (
+                ("oops", "200"), ("1.5", "200"), ("", "200"),
+                ("0", "200"), ("-1", "200"), ("2001", "200"),
+                ("50", "0"), ("50", "-1"), ("50", "5001")):
+            with self.subTest(pages=pages, additions=additions), self.assertRaises(ValueError):
+                acquisition_limits(
+                    "workflow_dispatch", "incremental", pages, additions)
+
+    def test_manual_limits_do_not_weaken_ref_guard(self):
+        for ref in ("refs/heads/feature/untrusted", "refs/pull/20/merge"):
+            with self.subTest(ref=ref):
+                self.assertFalse(update_context_is_trusted(
+                    "workflow_dispatch", ref, "incremental"))
+
     def test_workflows_encode_trust_contract(self):
         default_ref_guard = "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
         self.assertGreaterEqual(UPDATE.count(default_ref_guard), 4)
@@ -86,7 +134,15 @@ class WorkflowTrustTests(unittest.TestCase):
             "args+=(--delay 2.1 --full-scan --max-pages 2000 --max-additions 5000)",
             UPDATE,
         )
-        self.assertIn("args+=(--delay 1 --max-pages 50 --max-additions 200)", UPDATE)
+        self.assertIn(
+            'args+=(--delay 1 --max-pages "$MAX_PAGES" --max-additions "$MAX_ADDITIONS")',
+            UPDATE,
+        )
+        self.assertNotIn("--full-scan --max-pages \"$MAX_PAGES\"", UPDATE)
+        self.assertIn('values = {"max_pages": "50", "max_additions": "200"}', UPDATE)
+        self.assertIn('upper_bounds = {"max_pages": 2000, "max_additions": 5000}', UPDATE)
+        self.assertIn('INPUT_MAX_PAGES: ${{ inputs.max_pages }}', UPDATE)
+        self.assertIn('MAX_PAGES: ${{ needs.validate_acquisition.outputs.max_pages }}', UPDATE)
         self.assertIn(
             '--data-dir "$DATA" --full-scan \\\n'
             '  --max-pages 2000 --max-additions 5000 \\\n'

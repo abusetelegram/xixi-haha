@@ -23,6 +23,16 @@ on:
         description: Exact lowercase 40-hex data commit (required only for export-only)
         required: false
         type: string
+      max_pages:
+        description: Incremental listing-page limit (1-2000; ignored by full/export-only)
+        required: true
+        type: string
+        default: '50'
+      max_additions:
+        description: Incremental new-article limit (1-5000; ignored by full/export-only)
+        required: true
+        type: string
+        default: '200'
 
 permissions: {}
 
@@ -31,8 +41,58 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate_acquisition:
+    name: validate acquisition limits
+    if: >-
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      (github.event_name == 'schedule' ||
+       (github.event_name == 'workflow_dispatch' && inputs.mode != 'export-only'))
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      max_pages: ${{ steps.limits.outputs.max_pages }}
+      max_additions: ${{ steps.limits.outputs.max_additions }}
+    steps:
+      - name: Select and validate incremental limits
+        id: limits
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MODE: ${{ github.event_name == 'schedule' && 'incremental' || inputs.mode }}
+          INPUT_MAX_PAGES: ${{ inputs.max_pages }}
+          INPUT_MAX_ADDITIONS: ${{ inputs.max_additions }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+
+          if os.environ["EVENT_NAME"] == "schedule":
+              values = {"max_pages": "50", "max_additions": "200"}
+          elif os.environ["MODE"] == "incremental":
+              values = {
+                  "max_pages": os.environ["INPUT_MAX_PAGES"],
+                  "max_additions": os.environ["INPUT_MAX_ADDITIONS"],
+              }
+          else:
+              values = {"max_pages": "2000", "max_additions": "5000"}
+
+          upper_bounds = {"max_pages": 2000, "max_additions": 5000}
+          for name, raw in values.items():
+              if not raw.isascii() or not raw.isdecimal():
+                  raise SystemExit(f"{name} must be a positive decimal integer")
+              value = int(raw)
+              if not 1 <= value <= upper_bounds[name]:
+                  raise SystemExit(
+                      f"{name} must be between 1 and {upper_bounds[name]}")
+              values[name] = str(value)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              for name in ("max_pages", "max_additions"):
+                  output.write(f"{name}={values[name]}\n")
+          PY
+
   update_data:
     name: acquire, validate, and publish additions
+    needs: validate_acquisition
     if: >-
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
       (github.event_name == 'schedule' ||
@@ -96,6 +156,8 @@ jobs:
         working-directory: code
         env:
           MODE: ${{ github.event_name == 'schedule' && 'incremental' || inputs.mode }}
+          MAX_PAGES: ${{ needs.validate_acquisition.outputs.max_pages }}
+          MAX_ADDITIONS: ${{ needs.validate_acquisition.outputs.max_additions }}
         run: |
           set -euo pipefail
           args=(
@@ -104,7 +166,7 @@ jobs:
           )
           case "$MODE" in
             incremental)
-              args+=(--delay 1 --max-pages 50 --max-additions 200)
+              args+=(--delay 1 --max-pages "$MAX_PAGES" --max-additions "$MAX_ADDITIONS")
               ;;
             full)
               args+=(--delay 2.1 --full-scan --max-pages 2000 --max-additions 5000)

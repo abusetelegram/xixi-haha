@@ -165,6 +165,40 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(second.article_calls, [])
         self.assert_existing_unchanged()
 
+    def test_incremental_resume_retains_backlog_past_known_leading_pages(self):
+        # A prior complete discovery retained IDs 1-10.  A partial local
+        # publication made the newest pages canonical, while older IDs 1 and 2
+        # remain pending and ID 2 already has validated HTML cached.
+        corpus.create_articles(
+            self.directory, [record(aid) for aid in (7, 8, 9, 10)])
+        self.original = {path.name: path.read_bytes()
+                         for path in (self.directory / "articles").iterdir()}
+        update.write_json(
+            update.state_path(self.directory), [entry(aid) for aid in range(1, 11)])
+        cached_path = update.html_cache_path(self.directory, "2")
+        update.atomic_write(cached_path, CURRENT)
+        cached_before = cached_path.read_bytes()
+        pages = {
+            1: listing(1, [10, 9], 10),
+            2: listing(2, [8, 7], 10),
+        }
+        client = FakeClient(pages)
+
+        summary, code = update.run_update(self.directory, client)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(summary["stop_reason"], "two_known_pages")
+        self.assertEqual(summary["missing"], 2)
+        self.assertEqual(summary["added"], 2)
+        self.assertEqual(summary["downloaded"], 1)
+        self.assertEqual(summary["cache_hits"], 1)
+        self.assertEqual(client.listing_calls, [1, 2])
+        self.assertEqual(client.article_calls, ["1"])
+        self.assertEqual(cached_path.read_bytes(), cached_before)
+        self.assert_existing_unchanged()
+        self.assertEqual(set(corpus.load_articles(self.directory)),
+                         {str(aid) for aid in range(1, 11)} | {"99"})
+
     def test_full_scan_lists_every_page_but_fetches_only_missing(self):
         client = FakeClient()
         summary, code = update.run_update(self.directory, client, full_scan=True)
