@@ -41,6 +41,8 @@ class ExportTests(unittest.TestCase):
                        code_sha="a" * 40, data_sha="b" * 40)
         summary = exporter.export_corpus(self.data, first, **options)
         exporter.export_corpus(self.data, second, **options)
+        # Re-exporting to an existing real output directory remains supported.
+        exporter.export_corpus(self.data, first, **options)
 
         names = [exporter.MINIMAL_NAME, exporter.FULL_NAME,
                  exporter.ARCHIVE_NAME, exporter.PROVENANCE_NAME]
@@ -109,6 +111,98 @@ class ExportTests(unittest.TestCase):
                                            include_archive=True)
                 self.assertEqual(sentinel.read_bytes(), b"do not replace\n")
                 self.assertEqual(list(output.iterdir()), [sentinel])
+
+    def test_lexically_internal_output_symlink_is_rejected_without_changes(self):
+        corpus.create_articles(self.data, [full_record("1")])
+        target = self.base / "external-target"
+        target.mkdir()
+        sentinel = target / exporter.MINIMAL_NAME
+        sentinel.write_bytes(b"keep me\n")
+        output = self.data / "downloads"
+        output.symlink_to(target, target_is_directory=True)
+
+        with self.assertRaisesRegex(exporter.ExportError, "outside"):
+            exporter.export_corpus(self.data, output)
+
+        self.assertTrue(output.is_symlink())
+        self.assertEqual(output.readlink(), target)
+        self.assertEqual(sentinel.read_bytes(), b"keep me\n")
+        self.assertEqual(list(target.iterdir()), [sentinel])
+
+    def test_external_output_symlinks_and_symlink_ancestors_are_rejected(self):
+        corpus.create_articles(self.data, [full_record("1")])
+        target = self.base / "target"
+        target.mkdir()
+        sentinel = target / exporter.MINIMAL_NAME
+        sentinel.write_bytes(b"keep me\n")
+
+        output_link = self.base / "output-link"
+        output_link.symlink_to(target, target_is_directory=True)
+        with self.assertRaisesRegex(exporter.ExportError, "symlinks"):
+            exporter.export_corpus(self.data, output_link)
+        self.assertTrue(output_link.is_symlink())
+        self.assertEqual(sentinel.read_bytes(), b"keep me\n")
+
+        ancestor_link = self.base / "ancestor-link"
+        ancestor_link.symlink_to(target, target_is_directory=True)
+        with self.assertRaisesRegex(exporter.ExportError, "symlinks"):
+            exporter.export_corpus(self.data, ancestor_link / "nested")
+        self.assertTrue(ancestor_link.is_symlink())
+        self.assertFalse((target / "nested").exists())
+        self.assertEqual(sentinel.read_bytes(), b"keep me\n")
+
+    def test_output_equal_to_common_live_symlink_preserves_target(self):
+        target = self.base / "target"
+        data = target / "data"
+        corpus.create_articles(data, [full_record("1")])
+        sentinel = target / exporter.MINIMAL_NAME
+        sentinel.write_bytes(b"keep me\n")
+        output = self.base / "output-link"
+        output.symlink_to(target, target_is_directory=True)
+
+        with self.assertRaisesRegex(exporter.ExportError, "symlinks"):
+            exporter.export_corpus(output / "data", output)
+
+        self.assertTrue(output.is_symlink())
+        self.assertEqual(output.readlink(), target)
+        self.assertEqual(sentinel.read_bytes(), b"keep me\n")
+
+    def test_output_equal_to_common_dangling_symlink_preserves_link(self):
+        missing_target = self.base / "missing-target"
+        output = self.base / "dangling-output"
+        output.symlink_to(missing_target, target_is_directory=True)
+
+        with self.assertRaisesRegex(exporter.ExportError, "symlinks"):
+            exporter.export_corpus(output / "data", output)
+
+        self.assertTrue(output.is_symlink())
+        self.assertEqual(output.readlink(), missing_target)
+        self.assertFalse(missing_target.exists())
+
+    def test_dangling_output_symlink_is_rejected_without_replacing_link(self):
+        corpus.create_articles(self.data, [full_record("1")])
+        missing_target = self.base / "missing-target"
+        output = self.base / "dangling-output"
+        output.symlink_to(missing_target, target_is_directory=True)
+
+        with self.assertRaisesRegex(exporter.ExportError, "symlinks"):
+            exporter.export_corpus(self.data, output)
+
+        self.assertTrue(output.is_symlink())
+        self.assertEqual(output.readlink(), missing_target)
+        self.assertFalse(missing_target.exists())
+
+    def test_resolved_output_inside_real_data_checkout_is_rejected(self):
+        real_data = self.base / "real-data"
+        corpus.create_articles(real_data, [full_record("1")])
+        data_alias = self.base / "data-alias"
+        data_alias.symlink_to(real_data, target_is_directory=True)
+        output = real_data / "downloads"
+
+        with self.assertRaisesRegex(exporter.ExportError, "outside"):
+            exporter.export_corpus(data_alias, output)
+
+        self.assertFalse(output.exists())
 
     def test_output_inside_canonical_checkout_and_incomplete_sha_are_rejected(self):
         corpus.create_articles(self.data, [full_record("1")])

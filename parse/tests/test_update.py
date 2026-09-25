@@ -175,6 +175,20 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(client.article_calls, ["8", "7", "2", "1"])
         self.assertEqual(summary["added"], 4)
 
+    def test_variable_nonfinal_page_size_fails_closed_without_state_replacement(self):
+        update.write_json(update.state_path(self.directory), [entry(99)])
+        before = update.state_path(self.directory).read_bytes()
+        pages = {
+            1: listing(1, range(25, 15, -1), 25),
+            2: listing(2, range(15, 10, -1), 25),
+            3: listing(3, range(10, 5, -1), 25),
+        }
+        client = FakeClient(pages)
+        with self.assertRaisesRegex(update.FormatError, "page size changed"):
+            update.discover(self.directory, client, set(), full_scan=True)
+        self.assertEqual(client.listing_calls, [1, 2])
+        self.assertEqual(update.state_path(self.directory).read_bytes(), before)
+
     def test_cross_page_overlap_is_counted_and_deduplicated(self):
         pages = {1: listing(1, [8, 7], 5), 2: listing(2, [7, 6], 5),
                  3: listing(3, [5], 5)}
@@ -201,6 +215,43 @@ class WorkflowTests(unittest.TestCase):
             with self.subTest(pages=pages), self.assertRaises(update.FormatError):
                 update.discover(self.directory, FakeClient(pages), set(), full_scan=True)
             self.assertEqual(update.state_path(self.directory).read_bytes(), before)
+
+    def test_page_limit_precedence_around_incremental_stop(self):
+        known = {"3", "4", "5", "6", "99"}
+        cases = (
+            (2, False, "page_limit", [1, 2]),
+            (3, False, "page_limit", [1, 2, 3]),
+            (4, True, "two_known_pages", [1, 2, 3]),
+        )
+        for cap, complete, reason, calls in cases:
+            with self.subTest(cap=cap):
+                client = FakeClient()
+                result = update.discover(
+                    self.directory, client, known, max_pages=cap)
+                self.assertEqual(result["complete"], complete)
+                self.assertEqual(result["stop_reason"], reason)
+                self.assertEqual(client.listing_calls, calls)
+
+    def test_natural_exhaustion_at_page_limit_is_complete(self):
+        pages = {
+            1: listing(1, [8, 7], 6),
+            2: listing(2, [6, 5], 6),
+            3: listing(3, [4, 3], 6),
+        }
+        client = FakeClient(pages)
+        result = update.discover(
+            self.directory, client, {"3", "4", "5", "6"}, max_pages=3)
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["stop_reason"], "listing_exhausted")
+        self.assertEqual(client.listing_calls, [1, 2, 3])
+
+    def test_nonpositive_programmatic_page_limit_is_rejected_before_listing(self):
+        client = FakeClient()
+        for cap in (0, -1, False):
+            with self.subTest(cap=cap), self.assertRaisesRegex(
+                    update.FormatError, "positive integer"):
+                update.discover(self.directory, client, set(), max_pages=cap)
+        self.assertEqual(client.listing_calls, [])
 
     def test_page_limit_is_explicit_incomplete_and_does_not_publish(self):
         client = FakeClient()
@@ -234,6 +285,25 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(path.read_text(encoding="utf-8"), CURRENT)
         self.assertFalse((self.directory / "articles" / "8").exists())
 
+    def test_updater_lock_precedes_discovery_and_releases_on_success_and_failure(self):
+        blocked = FakeClient()
+        with corpus.writer_lock(self.directory):
+            with self.assertRaisesRegex(corpus.CorpusError, "another writer"):
+                update.run_update(self.directory, blocked)
+        self.assertEqual(blocked.listing_calls, [])
+        self.assertFalse(update.state_path(self.directory).exists())
+        self.assertFalse((self.directory / ".update.lock").exists())
+
+        successful = FakeClient()
+        summary, code = update.run_update(self.directory, successful)
+        self.assertEqual((code, summary["status"]), (0, "success"))
+        self.assertFalse((self.directory / ".update.lock").exists())
+
+        interrupted = FakeClient({1: KeyboardInterrupt()})
+        with self.assertRaises(KeyboardInterrupt):
+            update.run_update(self.directory, interrupted)
+        self.assertFalse((self.directory / ".update.lock").exists())
+
     def test_network_failure_after_one_download_publishes_nothing_but_keeps_cache(self):
         client = FakeClient(articles={"7": URLError("offline")})
         with self.assertRaises(URLError):
@@ -242,6 +312,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertFalse(update.html_cache_path(self.directory, "7").exists())
         self.assertFalse((self.directory / "articles" / "8.json").exists())
         self.assert_existing_unchanged()
+        self.assertFalse((self.directory / ".update.lock").exists())
 
     def test_malformed_article_after_valid_download_publishes_nothing(self):
         client = FakeClient(articles={"7": "<h1>Blocked</h1>"})
@@ -310,6 +381,11 @@ class ClientAndCliTests(unittest.TestCase):
     def test_cli_requires_explicit_data_dir(self):
         with self.assertRaises(SystemExit) as raised:
             update.main([])
+        self.assertEqual(raised.exception.code, 2)
+
+    def test_cli_rejects_zero_page_limit(self):
+        with self.assertRaises(SystemExit) as raised:
+            update.main(["--data-dir", "/tmp/unused", "--max-pages", "0"])
         self.assertEqual(raised.exception.code, 2)
 
     def test_cli_emits_machine_readable_success_and_incomplete_reports(self):

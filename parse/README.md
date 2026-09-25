@@ -23,9 +23,13 @@ existing article edits and deletions fail validation. Historical values,
 including 29 empty `text` arrays in the original 12,291 records, are preserved;
 new parser-created records must have nonempty text.
 
-Caches and listing state are ignored under `.cache/` and `.state/`. They are
-retry aids, not authoritative data. Generated aggregates must be written outside
-the data checkout and must not be committed to `data`.
+Caches and listing state are ignored under `.cache/` and `.state/`. Listings are
+stored in `.state/entries.json`; diagnostic API snapshots and validated HTML are
+stored under `.cache/api/` and `.cache/html/`. They are retry aids, not
+authoritative data and never make an ID count as published. The updater lock
+spans discovery, cache/state writes, downloads, and publication. Generated
+aggregates must be written outside the data checkout and must not be committed
+to `data`.
 
 ## Initial local import
 
@@ -55,10 +59,13 @@ for `result-min.json`.
 
 ## Incremental and full catch-up
 
-The updater prints one JSON report. Publication requires exit status 0 and
-`"complete": true`. Weekly incremental discovery starts at page 1 and stops
-after two wholly known pages. A full scan lists every advertised page but still
-fetches only IDs absent from the canonical store.
+The updater prints one JSON report. `update` is its only mode and is also the
+default positional command. Publication requires exit status 0 and
+`"complete": true`; argument errors exit 2 and interruption exits 130. Weekly
+incremental discovery starts at page 1 and stops after two wholly known pages.
+A full scan lists every advertised page but still fetches only IDs absent from
+the canonical store. Requests are sequential; `--delay`, `--timeout`, and
+`--retries` configure pacing and bounded transient retries.
 
 ```sh
 # Routine incremental run with finite production guards.
@@ -71,15 +78,24 @@ uv run --locked python parse/update.py update \
 uv run --locked python parse/update.py update \
   --data-dir "$DATA" --full-scan \
   --max-pages 2000 --max-additions 5000 \
-  --delay 1 --timeout 30 --retries 3
+  --delay 2.1 --timeout 30 --retries 3
 
 uv run --locked python parse/corpus.py validate --data-dir "$DATA"
 ```
 
+`--max-pages N` is a fail-closed request cap. If advertised pages remain when
+page `N` is reached, the report is incomplete with `stop_reason: page_limit` and
+publishes nothing; that cap takes precedence when the second known page is page
+`N`. A known-page stop before the cap succeeds, as does natural listing
+exhaustion exactly at the cap. Guard values must be positive.
+
 Reaching either guard is an incomplete failure and must not be committed. The
 upstream has no snapshot isolation; repeat supervised full scans until stable.
 Network, format, pagination, or article failures publish no partial batch.
-Validated caches may remain for retry.
+Validated caches may remain for retry. The updater does not read or write the
+checked-in migration aggregates and does not implement the historical
+`--write-full`/`result.json` updater workflow; aggregate creation is the separate
+export operation documented below.
 
 For a local incremental catch-up, capture the starting commit and machine report
 before acquisition. First run the publication gate with `--dry-run`; after
@@ -149,12 +165,28 @@ data checkouts, locked uv dependencies, finite scan/addition guards, one normal
 (non-forced) data push, exact-SHA exports, and serialized concurrency. The `data`
 branch must already exist; otherwise the workflow fails clearly.
 
-Manual dispatch defaults to dry-run. Clear dry-run only after reviewing bounds.
-`export-only` requires an exact lowercase 40-hex commit reachable from the
+Manual dispatch defaults to dry-run and privileged jobs run only when the event ref
+is the repository's actual default branch. Clear dry-run only after reviewing
+bounds. Full scans use a 2.1-second request delay (the one-second pace produced
+403 responses during a long scan); incremental scans retain the one-second
+pace. `export-only` requires an exact lowercase 40-hex commit reachable from the
 published `data` branch and retries derivative artifacts without changing data.
 Successful changed updates upload all aggregate forms plus provenance as a
 GitHub Actions artifact and explicitly call the reusable Telegram build with the
-same data SHA. No-change runs make no commit and do not rebuild derivatives.
+same data SHA and exact default-branch source SHA. The reusable consumer accepts
+only the default-branch update workflow's schedule/manual contexts, while its
+direct path remains limited to default-branch pushes. No-change runs make no
+commit and do not rebuild derivatives.
+
+Only the two DockerHub secrets required by the reusable image job are forwarded;
+the workflow does not use broad secret inheritance. These source-level event,
+ref, caller-path, and SHA checks make the checked-in workflow fail closed when
+it is accidentally dispatched against a feature/non-default ref. They are not
+a security boundary against a same-repository actor who can modify and execute
+a workflow (including removing these checks), nor against a repository
+administrator who can change Actions settings. Enforcing that stronger threat
+model requires protected environments or repository policy outside this
+source-only change.
 
 The workflow uses the repository's existing `DOCKERHUB_USERNAME` and
 `DOCKERHUB_TOKEN` secrets for image publication. No PAT, Pages action, or new
