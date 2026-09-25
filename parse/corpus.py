@@ -122,13 +122,21 @@ def _record_path(articles: Path, aid: str) -> Path:
     return articles / (canonical_id(aid) + ".json")
 
 
+def _articles_directory(data_dir: Path) -> Path:
+    """Return article storage only when it is absent or a real directory."""
+    articles = Path(data_dir) / "articles"
+    # Check links first because exists() follows them and is false for dangling
+    # links.  Neither kind may stand in for canonical storage.
+    if articles.is_symlink() or (articles.exists() and not articles.is_dir()):
+        raise CorpusError("{} must be a real directory".format(articles))
+    return articles
+
+
 def load_articles(data_dir: Path, strict_content: bool = False) -> dict:
     """Load and completely validate a canonical store in numeric-ID order."""
-    articles = Path(data_dir) / "articles"
+    articles = _articles_directory(data_dir)
     if not articles.exists():
         return {}
-    if not articles.is_dir() or articles.is_symlink():
-        raise CorpusError("{} must be a real directory".format(articles))
     found = {}
     normalized_names = {}
     named_paths = []
@@ -178,6 +186,14 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+class _WriterLease:
+    """Capability proving that this process holds a directory's writer lock."""
+
+    def __init__(self, directory: Path):
+        self.directory = directory.resolve()
+        self.active = True
+
+
 @contextmanager
 def writer_lock(data_dir: Path):
     """Coordinate all canonical writers through DATA/.update.lock."""
@@ -188,13 +204,15 @@ def writer_lock(data_dir: Path):
         handle = lock.open("x", encoding="utf-8", newline="\n")
     except FileExistsError as exc:
         raise CorpusError("{} exists; another writer may be running".format(lock)) from exc
+    lease = _WriterLease(directory)
     try:
         with handle:
             handle.write(str(os.getpid()) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
-        yield
+        yield lease
     finally:
+        lease.active = False
         try:
             lock.unlink()
         except FileNotFoundError:
@@ -282,14 +300,22 @@ def _publish_validated(data_dir: Path, existing: dict, batch: dict) -> int:
 
 
 def create_articles(data_dir: Path, records: Iterable[Mapping],
-                    strict_content: bool = True) -> int:
+                    strict_content: bool = True, writer=None) -> int:
     """Validate a whole batch, then add it atomically per file without overwrite.
 
     A crash may expose a complete subset of the batch, which is safe to rerun;
-    an existing canonical file is never replaced or truncated.
+    an existing canonical file is never replaced or truncated.  Callers that
+    already hold :func:`writer_lock` may pass its lease to avoid nested locking.
     """
     directory = Path(data_dir)
     batch = _validated_batch(records, strict_content)
+
+    if writer is not None:
+        if (not isinstance(writer, _WriterLease) or not writer.active
+                or writer.directory != directory.resolve()):
+            raise CorpusError("Invalid or inactive writer lock lease")
+        existing = load_articles(directory)
+        return _publish_validated(directory, existing, batch)
 
     with writer_lock(directory):
         existing = load_articles(directory)
@@ -423,9 +449,10 @@ def initialize_data_root(data_dir: Path) -> int:
     directory = Path(data_dir)
     payloads = _template_payloads()
     with writer_lock(directory):
+        articles = _articles_directory(directory)
         pending = _preflight_templates(directory, payloads)
         _publish_templates(directory, payloads, pending)
-        (directory / "articles").mkdir(exist_ok=True)
+        articles.mkdir(exist_ok=True)
         return len(pending)
 
 
@@ -443,7 +470,7 @@ def import_legacy(archive_path: Path, minimal_path: Path, data_dir: Path) -> dic
                 "Data root has articles outside legacy import: {}".format(extras[:5]))
         pending = _preflight(existing, records)
         _publish_templates(directory, payloads, template_pending)
-        (directory / "articles").mkdir(exist_ok=True)
+        _articles_directory(directory).mkdir(exist_ok=True)
         added = _publish_validated(directory, existing, records)
         validated = load_articles(directory)
         if validated != records:

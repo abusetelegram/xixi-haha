@@ -38,9 +38,34 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
         return False
 
 
+def _absolute_lexical(path: Path) -> Path:
+    """Return an absolute, normalized path without following symlinks."""
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _contains_output_symlink(data: Path, output: Path) -> bool:
+    """Check output-only path components without rejecting shared system aliases."""
+    if output.is_symlink():
+        return True
+    common = Path(os.path.commonpath((str(data), str(output))))
+    candidate = common
+    for part in output.relative_to(common).parts:
+        candidate /= part
+        if candidate.is_symlink():
+            return True
+    return False
+
+
 def _validate_locations(data_dir: Path, output_dir: Path) -> tuple:
-    data = Path(data_dir).resolve()
-    output = Path(output_dir).resolve()
+    data_lexical = _absolute_lexical(data_dir)
+    output_lexical = _absolute_lexical(output_dir)
+    if _is_relative_to(output_lexical, data_lexical):
+        raise ExportError("Output directory must be outside the canonical data checkout")
+    if _contains_output_symlink(data_lexical, output_lexical):
+        raise ExportError("Output path must not contain symlinks")
+
+    data = data_lexical.resolve()
+    output = output_lexical.resolve()
     if _is_relative_to(output, data):
         raise ExportError("Output directory must be outside the canonical data checkout")
     return data, output
