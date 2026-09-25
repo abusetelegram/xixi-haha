@@ -33,7 +33,10 @@ concurrency:
 jobs:
   update_data:
     name: acquire, validate, and publish additions
-    if: github.event_name == 'schedule' || inputs.mode != 'export-only'
+    if: >-
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      (github.event_name == 'schedule' ||
+       (github.event_name == 'workflow_dispatch' && inputs.mode != 'export-only'))
     runs-on: ubuntu-latest
     timeout-minutes: 240
     permissions:
@@ -97,14 +100,14 @@ jobs:
           set -euo pipefail
           args=(
             update --data-dir "$GITHUB_WORKSPACE/data"
-            --delay 1 --timeout 30 --retries 3
+            --timeout 30 --retries 3
           )
           case "$MODE" in
             incremental)
-              args+=(--max-pages 50 --max-additions 200)
+              args+=(--delay 1 --max-pages 50 --max-additions 200)
               ;;
             full)
-              args+=(--full-scan --max-pages 2000 --max-additions 5000)
+              args+=(--delay 2.1 --full-scan --max-pages 2000 --max-additions 5000)
               ;;
             *)
               echo "Unsupported acquisition mode: $MODE" >&2
@@ -150,7 +153,9 @@ jobs:
 
   resolve_export_only:
     name: validate export-only data commit
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'export-only'
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.mode == 'export-only' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -205,6 +210,8 @@ jobs:
       - resolve_export_only
     if: >-
       always() && !cancelled() &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
       ((needs.update_data.result == 'success' && needs.update_data.outputs.changed == 'true') ||
        needs.resolve_export_only.result == 'success')
     runs-on: ubuntu-latest
@@ -271,10 +278,16 @@ jobs:
     needs:
       - update_data
       - export
-    if: needs.update_data.outputs.changed == 'true' && needs.export.result == 'success'
+    if: >-
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+      needs.update_data.outputs.changed == 'true' && needs.export.result == 'success'
     permissions:
       contents: read
     uses: ./.github/workflows/docker-telegram.yml
     with:
+      source_sha: ${{ github.sha }}
       data_sha: ${{ needs.update_data.outputs.data_sha }}
-    secrets: inherit
+    secrets:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}

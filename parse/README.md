@@ -149,12 +149,28 @@ data checkouts, locked uv dependencies, finite scan/addition guards, one normal
 (non-forced) data push, exact-SHA exports, and serialized concurrency. The `data`
 branch must already exist; otherwise the workflow fails clearly.
 
-Manual dispatch defaults to dry-run. Clear dry-run only after reviewing bounds.
-`export-only` requires an exact lowercase 40-hex commit reachable from the
+Manual dispatch defaults to dry-run and privileged jobs run only when the event ref
+is the repository's actual default branch. Clear dry-run only after reviewing
+bounds. Full scans use a 2.1-second request delay (the one-second pace produced
+403 responses during a long scan); incremental scans retain the one-second
+pace. `export-only` requires an exact lowercase 40-hex commit reachable from the
 published `data` branch and retries derivative artifacts without changing data.
 Successful changed updates upload all aggregate forms plus provenance as a
 GitHub Actions artifact and explicitly call the reusable Telegram build with the
-same data SHA. No-change runs make no commit and do not rebuild derivatives.
+same data SHA and exact default-branch source SHA. The reusable consumer accepts
+only the default-branch update workflow's schedule/manual contexts, while its
+direct path remains limited to default-branch pushes. No-change runs make no
+commit and do not rebuild derivatives.
+
+Only the two DockerHub secrets required by the reusable image job are forwarded;
+the workflow does not use broad secret inheritance. These source-level event,
+ref, caller-path, and SHA checks make the checked-in workflow fail closed when
+it is accidentally dispatched against a feature/non-default ref. They are not
+a security boundary against a same-repository actor who can modify and execute
+a workflow (including removing these checks), nor against a repository
+administrator who can change Actions settings. Enforcing that stronger threat
+model requires protected environments or repository policy outside this
+source-only change.
 
 The workflow uses the repository's existing `DOCKERHUB_USERNAME` and
 `DOCKERHUB_TOKEN` secrets for image publication. No PAT, Pages action, or new
