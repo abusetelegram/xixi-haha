@@ -139,6 +139,51 @@ class CanonicalStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(corpus.CorpusError, "Duplicate normalized article filenames"):
             corpus.load_articles(self.directory)
 
+    def test_loader_accepts_absent_or_real_articles_directory(self):
+        self.assertEqual(corpus.load_articles(self.directory), {})
+        (self.directory / "articles").mkdir()
+        self.assertEqual(corpus.load_articles(self.directory), {})
+
+    def test_loader_rejects_existing_and_dangling_articles_symlinks(self):
+        outside = self.directory / "outside"
+        outside.mkdir()
+        (outside / "marker").write_text("unchanged", encoding="utf-8")
+        for name, target in (("existing", outside),
+                             ("dangling", self.directory / "missing")):
+            root = self.directory / name
+            root.mkdir()
+            (root / "articles").symlink_to(target, target_is_directory=True)
+            with self.subTest(name=name), self.assertRaisesRegex(
+                    corpus.CorpusError, "must be a real directory"):
+                corpus.load_articles(root)
+        self.assertEqual((outside / "marker").read_text(encoding="utf-8"), "unchanged")
+
+    def test_initializer_accepts_absent_or_real_articles_directory(self):
+        absent = self.directory / "absent"
+        self.assertEqual(corpus.initialize_data_root(absent), 4)
+        self.assertTrue((absent / "articles").is_dir())
+        real = self.directory / "real"
+        (real / "articles").mkdir(parents=True)
+        self.assertEqual(corpus.initialize_data_root(real), 4)
+        self.assertTrue((real / "articles").is_dir())
+
+    def test_initializer_rejects_articles_symlinks_before_template_publication(self):
+        outside = self.directory / "outside-init"
+        outside.mkdir()
+        marker = outside / "marker"
+        marker.write_text("unchanged", encoding="utf-8")
+        for name, target in (("existing-init", outside),
+                             ("dangling-init", self.directory / "missing-init")):
+            root = self.directory / name
+            root.mkdir()
+            (root / "articles").symlink_to(target, target_is_directory=True)
+            with self.subTest(name=name), self.assertRaisesRegex(
+                    corpus.CorpusError, "must be a real directory"):
+                corpus.initialize_data_root(root)
+            for template in ("README.md", "schema.json", ".gitignore", "index.html"):
+                self.assertFalse((root / template).exists())
+        self.assertEqual(marker.read_text(encoding="utf-8"), "unchanged")
+
 
 class LegacyImportTests(unittest.TestCase):
     def setUp(self):
@@ -210,6 +255,24 @@ class LegacyImportTests(unittest.TestCase):
             handle.addfile(info, io.BytesIO(payload))
         with self.assertRaisesRegex(corpus.CorpusError, "only the regular file"):
             corpus.load_legacy(unsafe, minimal)
+
+    def test_import_rejects_articles_symlinks_before_publication(self):
+        archive, minimal = write_legacy(self.source, [full_record("1")])
+        outside = self.base / "outside"
+        outside.mkdir()
+        marker = outside / "marker"
+        marker.write_text("unchanged", encoding="utf-8")
+        for name, link_target in (("existing-link", outside),
+                                  ("dangling-link", self.base / "missing")):
+            target = self.base / name
+            target.mkdir()
+            (target / "articles").symlink_to(link_target, target_is_directory=True)
+            with self.subTest(name=name), self.assertRaisesRegex(
+                    corpus.CorpusError, "must be a real directory"):
+                corpus.import_legacy(archive, minimal, target)
+            for template in ("README.md", "schema.json", ".gitignore", "index.html"):
+                self.assertFalse((target / template).exists())
+        self.assertEqual(marker.read_text(encoding="utf-8"), "unchanged")
 
     def test_cli_import_and_validate(self):
         archive, minimal = write_legacy(self.source, [full_record("1")])
