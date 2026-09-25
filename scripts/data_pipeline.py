@@ -98,6 +98,14 @@ def _remote_data_sha(directory: Path) -> str:
     return _exact_sha(fields[0], "remote data SHA")
 
 
+def _require_remote_data_sha(directory: Path, expected_sha: str) -> None:
+    remote_sha = _remote_data_sha(directory)
+    if remote_sha != expected_sha:
+        raise PipelineError(
+            "Remote data branch advanced from {} to {}; refusing to publish".format(
+                expected_sha, remote_sha))
+
+
 def publish_changes(data_dir: Path, report_path: Path, start_sha: str, source_sha: str,
                     run_url: str, dry_run: bool = False) -> dict:
     """Validate updater output, then commit and normally push additions only."""
@@ -126,6 +134,7 @@ def publish_changes(data_dir: Path, report_path: Path, start_sha: str, source_sh
     if len(additions) != report["added"]:
         raise PipelineError("New article count does not match updater report")
 
+    _require_remote_data_sha(data, start_sha)
     if dry_run:
         return {
             "status": "dry-run", "changed": bool(additions), "added": len(additions),
@@ -151,11 +160,7 @@ def publish_changes(data_dir: Path, report_path: Path, start_sha: str, source_sh
 
     # This explicit preflight gives a clear error.  The normal, non-forced push
     # remains the authoritative race guard if the remote advances afterwards.
-    remote_sha = _remote_data_sha(data)
-    if remote_sha != start_sha:
-        raise PipelineError(
-            "Remote data branch advanced from {} to {}; refusing to push".format(
-                start_sha, remote_sha))
+    _require_remote_data_sha(data, start_sha)
     _git(data, "push", "--porcelain", "origin", "HEAD:refs/heads/data")
     if _remote_data_sha(data) != new_sha:
         raise PipelineError("Remote data branch does not match the pushed commit")
@@ -171,7 +176,10 @@ def export_exact(code_dir: Path, data_dir: Path, output_dir: Path, code_sha: str
     """Export a clean exact data commit, removing fresh output on any failure."""
     code = Path(code_dir).resolve()
     data = Path(data_dir).resolve()
-    output = Path(output_dir).resolve()
+    requested_output = Path(output_dir)
+    if requested_output.is_symlink() or requested_output.exists():
+        raise PipelineError("Export output directory must not already exist or be a symlink")
+    output = requested_output.resolve()
     code_sha = _exact_sha(code_sha, "code SHA")
     data_sha = _exact_sha(data_sha, "data SHA")
     if _git(code, "rev-parse", "HEAD").stdout.strip() != code_sha:
@@ -182,8 +190,6 @@ def export_exact(code_dir: Path, data_dir: Path, output_dir: Path, code_sha: str
         raise PipelineError("Data checkout does not match the requested SHA")
     if _status_entries(data):
         raise PipelineError("Exact data checkout must be clean before export")
-    if output.exists():
-        raise PipelineError("Export output directory must not already exist")
     try:
         return export_function(
             data, output, include_full=not minimal_only,

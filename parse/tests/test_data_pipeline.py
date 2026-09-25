@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -84,6 +85,19 @@ class DataPipelineTests(unittest.TestCase):
         self.assertFalse(result["changed"])
         self.assertEqual(self.start_sha, run("git", "-C", str(checkout), "rev-parse", "HEAD"))
 
+    def test_no_change_rejects_advanced_remote(self):
+        checkout = self.clone("stale-no-change")
+        racer = self.clone("no-change-winner")
+        (racer / "notice.txt").write_text("advance\n", encoding="utf-8")
+        run("git", "-C", str(racer), "add", "notice.txt")
+        run("git", "-C", str(racer), "commit", "-m", "advance remote")
+        run("git", "-C", str(racer), "push", "origin", "data")
+
+        with self.assertRaisesRegex(data_pipeline.PipelineError, "Remote data branch advanced"):
+            data_pipeline.publish_changes(
+                checkout, self.report(self.root, known=1, added=0, records=1),
+                self.start_sha, SOURCE_SHA, "https://example.invalid/run/stale-no-change")
+
     def test_dry_run_validates_addition_without_commit_or_push(self):
         checkout = self.clone("dry-run")
         (checkout / "articles" / "2.json").write_bytes(corpus.serialize_record(record(2)))
@@ -97,6 +111,20 @@ class DataPipelineTests(unittest.TestCase):
             self.start_sha,
             run("git", "--git-dir", str(self.remote), "rev-parse", "refs/heads/data"),
         )
+
+    def test_dry_run_rejects_advanced_remote(self):
+        checkout = self.clone("stale-dry-run")
+        (checkout / "articles" / "2.json").write_bytes(corpus.serialize_record(record(2)))
+        racer = self.clone("dry-run-winner")
+        (racer / "notice.txt").write_text("advance\n", encoding="utf-8")
+        run("git", "-C", str(racer), "add", "notice.txt")
+        run("git", "-C", str(racer), "commit", "-m", "advance remote")
+        run("git", "-C", str(racer), "push", "origin", "data")
+
+        with self.assertRaisesRegex(data_pipeline.PipelineError, "Remote data branch advanced"):
+            data_pipeline.publish_changes(
+                checkout, self.report(self.root, known=1, added=1, records=2),
+                self.start_sha, SOURCE_SHA, "https://example.invalid/run/stale-dry", dry_run=True)
 
     def test_nonzero_acquisition_commits_only_new_article_and_pushes(self):
         checkout = self.clone("publisher")
@@ -146,6 +174,62 @@ class DataPipelineTests(unittest.TestCase):
             winner_sha,
             run("git", "--git-dir", str(self.remote), "rev-parse", "refs/heads/data"),
         )
+
+    def test_normal_push_rejects_race_after_preflight(self):
+        publisher = self.clone("late-race-publisher")
+        racer = self.clone("late-race-winner")
+        (publisher / "articles" / "2.json").write_bytes(corpus.serialize_record(record(2)))
+        original_remote_data_sha = data_pipeline._remote_data_sha
+        checks = []
+
+        def race_after_snapshot(directory):
+            snapshot = original_remote_data_sha(directory)
+            checks.append(snapshot)
+            if len(checks) == 2:
+                (racer / "notice.txt").write_text("late advance\n", encoding="utf-8")
+                run("git", "-C", str(racer), "add", "notice.txt")
+                run("git", "-C", str(racer), "commit", "-m", "late advance remote")
+                run("git", "-C", str(racer), "push", "origin", "data")
+            return snapshot
+
+        with mock.patch.object(data_pipeline, "_remote_data_sha", side_effect=race_after_snapshot):
+            with self.assertRaises(data_pipeline.PipelineError):
+                data_pipeline.publish_changes(
+                    publisher, self.report(self.root, known=1, added=1, records=2),
+                    self.start_sha, SOURCE_SHA, "https://example.invalid/run/late-race")
+        self.assertEqual(2, len(checks))
+        self.assertEqual(
+            run("git", "-C", str(racer), "rev-parse", "HEAD"),
+            run("git", "--git-dir", str(self.remote), "rev-parse", "refs/heads/data"),
+        )
+
+    def test_export_rejects_and_preserves_dangling_output_symlink(self):
+        code = self.root / "symlink-code"
+        run("git", "init", "-b", "master", str(code))
+        run("git", "-C", str(code), "config", "user.name", "Test")
+        run("git", "-C", str(code), "config", "user.email", "test@example.invalid")
+        (code / "tracked").write_text("code\n", encoding="utf-8")
+        run("git", "-C", str(code), "add", "tracked")
+        run("git", "-C", str(code), "commit", "-m", "code")
+        code_sha = run("git", "-C", str(code), "rev-parse", "HEAD")
+        data = self.clone("symlink-export-data")
+        target = self.root / "missing-export-target"
+        output = self.root / "exports-link"
+        output.symlink_to(target, target_is_directory=True)
+        called = []
+
+        def unexpected_export(*_args, **_kwargs):
+            called.append(True)
+
+        with self.assertRaisesRegex(data_pipeline.PipelineError, "must not already exist or be a symlink"):
+            data_pipeline.export_exact(
+                code, data, output, code_sha, self.start_sha,
+                export_function=unexpected_export,
+            )
+        self.assertTrue(output.is_symlink())
+        self.assertEqual(target, output.readlink())
+        self.assertFalse(target.exists())
+        self.assertEqual([], called)
 
     def test_export_failure_removes_partial_output(self):
         code = self.root / "code"
