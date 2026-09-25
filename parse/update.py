@@ -17,7 +17,8 @@ from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 from bs4 import BeautifulSoup
 
-from corpus import CorpusError, create_articles, load_articles, normalize_id
+from corpus import (CorpusError, create_articles, load_articles, normalize_id,
+                    writer_lock)
 
 BASE_URL = "http://jhsjk.people.cn"
 LOGGER = logging.getLogger(__name__)
@@ -222,6 +223,7 @@ def discover(directory: Path, client, known, full_scan: bool = False,
     page = 1
     page_count = None
     advertised_total = None
+    page_size = None
     overlaps = 0
     pages_visited = 0
     complete = True
@@ -232,11 +234,20 @@ def discover(directory: Path, client, known, full_scan: bool = False,
         pages_visited += 1
         if advertised_total is None:
             advertised_total = total
-            page_count = math.ceil(total / len(rows)) if rows else 1
+            page_size = len(rows)
+            page_count = math.ceil(total / page_size) if rows else 1
         elif total != advertised_total:
             raise FormatError(
                 "Listing total changed from {} to {} on page {}".format(
                     advertised_total, total, page))
+        if page < page_count and len(rows) != page_size:
+            raise FormatError(
+                "Listing page size changed from {} to {} on non-final page {}".format(
+                    page_size, len(rows), page))
+        if page == page_count and len(rows) > page_size:
+            raise FormatError(
+                "Final listing page {} exceeds initial page size {}".format(
+                    page, page_size))
         ids = {row["article_id"] for row in rows}
         if ids and ids == previous_ids:
             raise FormatError("Listing repeated page {} instead of advancing".format(page))
@@ -311,41 +322,43 @@ def fetch_missing(directory: Path, client, entries: dict, known) -> dict:
 
 def run_update(directory: Path, client, full_scan: bool = False,
                max_pages=None, max_additions=None) -> tuple:
-    """Acquire a complete batch, then publish it through the canonical store API."""
+    """Acquire and publish one batch while holding the canonical writer lock."""
     directory = Path(directory)
-    known = load_articles(directory)
-    scan = discover(directory, client, set(known), full_scan, max_pages)
-    summary = {
-        "status": "success" if scan["complete"] else "incomplete",
-        "mode": "full" if full_scan else "incremental",
-        "complete": scan["complete"],
-        "stop_reason": scan["stop_reason"],
-        "pages": scan["pages"],
-        "advertised_total": scan["advertised_total"],
-        "listed": scan["listed"],
-        "overlaps": scan["overlaps"],
-        "known": len(known),
-        "missing": len(scan["missing_ids"]),
-        "downloaded": 0,
-        "cache_hits": 0,
-        "added": 0,
-        "records": len(known),
-    }
-    if not scan["complete"]:
-        return summary, 1
-    if max_additions is not None and len(scan["missing_ids"]) > max_additions:
-        summary.update(status="incomplete", complete=False, stop_reason="addition_limit")
-        return summary, 1
+    with writer_lock(directory) as writer:
+        known = load_articles(directory)
+        scan = discover(directory, client, set(known), full_scan, max_pages)
+        summary = {
+            "status": "success" if scan["complete"] else "incomplete",
+            "mode": "full" if full_scan else "incremental",
+            "complete": scan["complete"],
+            "stop_reason": scan["stop_reason"],
+            "pages": scan["pages"],
+            "advertised_total": scan["advertised_total"],
+            "listed": scan["listed"],
+            "overlaps": scan["overlaps"],
+            "known": len(known),
+            "missing": len(scan["missing_ids"]),
+            "downloaded": 0,
+            "cache_hits": 0,
+            "added": 0,
+            "records": len(known),
+        }
+        if not scan["complete"]:
+            return summary, 1
+        if max_additions is not None and len(scan["missing_ids"]) > max_additions:
+            summary.update(status="incomplete", complete=False, stop_reason="addition_limit")
+            return summary, 1
 
-    fetched = fetch_missing(directory, client, scan["entries"], known)
-    # No canonical mutation occurs until every missing article has fetched,
-    # parsed, and passed strict whole-batch validation in create_articles.
-    added = create_articles(directory, fetched["records"], strict_content=True)
-    final = load_articles(directory)
-    summary.update(
-        downloaded=fetched["downloaded"], cache_hits=fetched["cache_hits"],
-        added=added, records=len(final))
-    return summary, 0
+        fetched = fetch_missing(directory, client, scan["entries"], known)
+        # The writer lease spans discovery/state/cache writes and publication;
+        # passing it avoids reacquiring the same non-reentrant lock.
+        added = create_articles(
+            directory, fetched["records"], strict_content=True, writer=writer)
+        final = load_articles(directory)
+        summary.update(
+            downloaded=fetched["downloaded"], cache_hits=fetched["cache_hits"],
+            added=added, records=len(final))
+        return summary, 0
 
 
 def positive_int(value):

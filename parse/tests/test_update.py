@@ -152,6 +152,20 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(client.article_calls, ["8", "7", "2", "1"])
         self.assertEqual(summary["added"], 4)
 
+    def test_variable_nonfinal_page_size_fails_closed_without_state_replacement(self):
+        update.write_json(update.state_path(self.directory), [entry(99)])
+        before = update.state_path(self.directory).read_bytes()
+        pages = {
+            1: listing(1, range(25, 15, -1), 25),
+            2: listing(2, range(15, 10, -1), 25),
+            3: listing(3, range(10, 5, -1), 25),
+        }
+        client = FakeClient(pages)
+        with self.assertRaisesRegex(update.FormatError, "page size changed"):
+            update.discover(self.directory, client, set(), full_scan=True)
+        self.assertEqual(client.listing_calls, [1, 2])
+        self.assertEqual(update.state_path(self.directory).read_bytes(), before)
+
     def test_cross_page_overlap_is_counted_and_deduplicated(self):
         pages = {1: listing(1, [8, 7], 5), 2: listing(2, [7, 6], 5),
                  3: listing(3, [5], 5)}
@@ -211,6 +225,25 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(path.read_text(encoding="utf-8"), CURRENT)
         self.assertFalse((self.directory / "articles" / "8").exists())
 
+    def test_updater_lock_precedes_discovery_and_releases_on_success_and_failure(self):
+        blocked = FakeClient()
+        with corpus.writer_lock(self.directory):
+            with self.assertRaisesRegex(corpus.CorpusError, "another writer"):
+                update.run_update(self.directory, blocked)
+        self.assertEqual(blocked.listing_calls, [])
+        self.assertFalse(update.state_path(self.directory).exists())
+        self.assertFalse((self.directory / ".update.lock").exists())
+
+        successful = FakeClient()
+        summary, code = update.run_update(self.directory, successful)
+        self.assertEqual((code, summary["status"]), (0, "success"))
+        self.assertFalse((self.directory / ".update.lock").exists())
+
+        interrupted = FakeClient({1: KeyboardInterrupt()})
+        with self.assertRaises(KeyboardInterrupt):
+            update.run_update(self.directory, interrupted)
+        self.assertFalse((self.directory / ".update.lock").exists())
+
     def test_network_failure_after_one_download_publishes_nothing_but_keeps_cache(self):
         client = FakeClient(articles={"7": URLError("offline")})
         with self.assertRaises(URLError):
@@ -219,6 +252,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertFalse(update.html_cache_path(self.directory, "7").exists())
         self.assertFalse((self.directory / "articles" / "8.json").exists())
         self.assert_existing_unchanged()
+        self.assertFalse((self.directory / ".update.lock").exists())
 
     def test_malformed_article_after_valid_download_publishes_nothing(self):
         client = FakeClient(articles={"7": "<h1>Blocked</h1>"})

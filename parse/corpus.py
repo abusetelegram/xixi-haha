@@ -178,6 +178,14 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+class _WriterLease:
+    """Capability proving that this process holds a directory's writer lock."""
+
+    def __init__(self, directory: Path):
+        self.directory = directory.resolve()
+        self.active = True
+
+
 @contextmanager
 def writer_lock(data_dir: Path):
     """Coordinate all canonical writers through DATA/.update.lock."""
@@ -188,13 +196,15 @@ def writer_lock(data_dir: Path):
         handle = lock.open("x", encoding="utf-8", newline="\n")
     except FileExistsError as exc:
         raise CorpusError("{} exists; another writer may be running".format(lock)) from exc
+    lease = _WriterLease(directory)
     try:
         with handle:
             handle.write(str(os.getpid()) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
-        yield
+        yield lease
     finally:
+        lease.active = False
         try:
             lock.unlink()
         except FileNotFoundError:
@@ -282,14 +292,22 @@ def _publish_validated(data_dir: Path, existing: dict, batch: dict) -> int:
 
 
 def create_articles(data_dir: Path, records: Iterable[Mapping],
-                    strict_content: bool = True) -> int:
+                    strict_content: bool = True, writer=None) -> int:
     """Validate a whole batch, then add it atomically per file without overwrite.
 
     A crash may expose a complete subset of the batch, which is safe to rerun;
-    an existing canonical file is never replaced or truncated.
+    an existing canonical file is never replaced or truncated.  Callers that
+    already hold :func:`writer_lock` may pass its lease to avoid nested locking.
     """
     directory = Path(data_dir)
     batch = _validated_batch(records, strict_content)
+
+    if writer is not None:
+        if (not isinstance(writer, _WriterLease) or not writer.active
+                or writer.directory != directory.resolve()):
+            raise CorpusError("Invalid or inactive writer lock lease")
+        existing = load_articles(directory)
+        return _publish_validated(directory, existing, batch)
 
     with writer_lock(directory):
         existing = load_articles(directory)

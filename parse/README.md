@@ -1,7 +1,8 @@
 # Corpus updater
 
 Python 3.9+ CLI for `http://jhsjk.people.cn` (base URL unchanged). Run commands
-from the repository root; data paths default to `parse/`, not the working directory.
+from the repository root and pass the external canonical data-branch worktree
+explicitly; the updater never defaults to repository data.
 
 ## Install and run
 
@@ -10,41 +11,27 @@ the repository root:
 
 ```sh
 uv sync --locked
+DATA=/path/to/article-data-worktree
 
-# Fetch recent missing articles and merge into result-min.json.
-uv run --locked python parse/update.py update
+# Fetch recent missing articles into the canonical create-only store.
+uv run --locked python parse/update.py update --data-dir "$DATA"
 
-# Reconcile older gaps as well; recommended for the initial migration.
-# This scans the entire listing and can take a long time.
-uv run --locked python parse/update.py update --full-scan --write-full
+# Reconcile older gaps as well; this can take a long time.
+uv run --locked python parse/update.py update --data-dir "$DATA" --full-scan
 
 # Inspect options, or enable detailed request/exception diagnostics.
 uv run --locked python parse/update.py --help
-uv run --locked python parse/update.py update --log-level DEBUG
+uv run --locked python parse/update.py update --data-dir "$DATA" --log-level DEBUG
 ```
 
-`update` is the default mode. Logs go to stderr. Exit codes: `0` success,
-`1` fetch/format/filesystem failure, `2` invalid arguments, `130` interruption.
-Log levels: `DEBUG`, `INFO` (default), `WARNING`, `ERROR`, `CRITICAL`, case-insensitive.
-Requests are sequential and paced (`--delay 0.5` seconds minimum between starts),
-with a 30-second timeout and three retries for transient failures. Configure with
-`--delay`, `--timeout`, and `--retries` (`0` disables retries). Permanent HTTP errors
-and unknown formats stop the run instead of silently publishing incomplete data.
-
-## Modes
-
-| Mode | Network | Behavior |
-| --- | --- | --- |
-| `update` | Yes | Discover → download → extract/publish |
-| `entries` | Yes | Refresh listings and merge `entries.json`; no corpus changes |
-| `download` | Yes | Fetch missing/invalid HTML for unpublished IDs in `entries.json` |
-| `extract` | No | Validate cached HTML and merge new records into `result-min.json` |
-
-```sh
-uv run --locked python parse/update.py entries --full-scan
-uv run --locked python parse/update.py download
-uv run --locked python parse/update.py extract --write-full
-```
+`update` is the only mode and is also the default positional command. Logs go to
+stderr. Exit codes: `0` success, `1` fetch/format/filesystem failure, `2` invalid
+arguments, `130` interruption. Log levels: `DEBUG`, `INFO` (default), `WARNING`,
+`ERROR`, `CRITICAL`, case-insensitive. Requests are sequential and paced
+(`--delay 0.5` seconds minimum between starts), with a 30-second timeout and three
+retries for transient failures. Configure with `--delay`, `--timeout`, and
+`--retries` (`0` disables retries). Permanent HTTP errors and unknown formats stop
+the run instead of silently publishing incomplete data.
 
 ### Incremental vs. full scans
 
@@ -60,9 +47,9 @@ size from the first response instead of hardcoding ten. Duplicate IDs across pag
 are merged. The remote API has no snapshot isolation; another full scan may be
 needed if entries move while crawling.
 
-`--max-pages N` explicitly limits discovery (a **partial** scan), useful for smoke
-tests. It does not limit previously queued IDs in `entries.json`. A successful
-limited run does not mean the whole site has been synchronized.
+`--max-pages N` is a fail-closed guard: if more pages are advertised, the
+run reports an incomplete scan and publishes nothing. It does not limit
+previously queued IDs in `.state/entries.json`.
 
 ### Isolated smoke test
 
@@ -75,8 +62,7 @@ cp parse/result-min.json "$tmp/"
 uv run --locked python parse/update.py update --data-dir "$tmp" --max-pages 1
 ```
 
-The repository data remains untouched. To test `--write-full` in that directory,
-also copy `parse/result-full.tgz` before running the updater.
+The repository data remains untouched.
 
 ## Data preservation and project compatibility
 
