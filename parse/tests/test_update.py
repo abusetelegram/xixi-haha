@@ -61,11 +61,18 @@ class ParsingTests(unittest.TestCase):
         result = update.parse_article(CURRENT, entry(1))
         self.assertEqual(result["text"], ["第一段有内联标签。", "第二段。", "换行内容。",
                                           "《 人民日报 》（ 2026年09月24日 01 版）"])
-        self.assertEqual(result["editor"], "(责编：测试)")
+        self.assertEqual(result["editor"], "测试")
         self.assertEqual(result["title"], "标题")
         self.assertEqual(set(result), set(corpus.BASE_FIELDS))
         self.assertIn("<strong>", result["article"])
         self.assertNotIn("摘要", "".join(result["text"]))
+
+    def test_editor_entity_is_decoded_once_at_html_extraction(self):
+        html = ('<div class="d2txt_con"><p>正文</p>'
+                '<div class="editor">(责编：A&amp;amp;B)</div></div>')
+        result = update.parse_article(html, entry(1))
+        self.assertEqual(result["editor"], "A&amp;B")
+        self.assertIn("A&amp;amp;B", result["article"])
 
     def test_legacy_newline_body_and_absent_editor(self):
         result = record(1)
@@ -84,7 +91,7 @@ class ParsingTests(unittest.TestCase):
             "title": "时习之｜健全城市社区治理体系 习近平牵挂“最后一公里”",
             "date": "2023-12-17 09:49:04",
             "author": "人民网-中国共产党新闻网",
-            "editor": "(责编：王潇潇)",
+            "editor": "王潇潇",
             "article": ('<div class="d2txt_con clearfix">\n'
                         '<p><p style="text-align: center;"><img alt="" height="7372" '
                         'src="https://cpc.people.com.cn/NMediaFile/2023/1216/'

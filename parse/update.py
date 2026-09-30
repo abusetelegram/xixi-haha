@@ -18,7 +18,7 @@ from urllib.request import HTTPCookieProcessor, Request, build_opener
 from bs4 import BeautifulSoup
 
 from corpus import (CorpusError, article_image_media, create_articles, is_error_shell,
-                    load_articles, normalize_id, writer_lock)
+                    load_articles, normalize_editor, normalize_id, writer_lock)
 
 BASE_URL = "http://jhsjk.people.cn"
 LOGGER = logging.getLogger(__name__)
@@ -87,7 +87,7 @@ def parse_article(html: str, entry: dict) -> dict:
         raise FormatError("Article {} has no .d2txt_con body".format(entry["article_id"]))
     raw_body = str(body)
     editor = soup.select_one(".editor")
-    editor_text = editor.get_text("", strip=True) if editor else "不明"
+    editor_text = normalize_editor(editor.get_text("", strip=True)) if editor else "不明"
     for unwanted in body.select("script, style, noscript, .editor"):
         unwanted.decompose()
     for br in body.find_all("br"):

@@ -58,6 +58,43 @@ def write_legacy(directory, records, minimal=None, archive_json=None):
     return archive, minimal_path
 
 
+class EditorNormalizationTests(unittest.TestCase):
+    def test_conservative_table_and_idempotence(self):
+        cases = (
+            (" (责编：张三) \n", "张三"),
+            ("（责编:张三）", "张三"),
+            ("(责任编辑：张三)", "张三"),
+            ("（编辑:张三）", "张三"),
+            ("责编：张三", "张三"),
+            ("编辑:张三、李四，王五", "张三、李四，王五"),
+            ("(责编：杨丽娜(实习)   )", "杨丽娜(实习)"),
+            ("（责编：张湘忆（实习））", "张湘忆（实习）"),
+            ("(摄影：张三)", "(摄影：张三)"),
+            ("(责编：张三）", "(责编：张三）"),
+            ("(责编：张三))", "(责编：张三))"),
+            ("责编：张三)", "责编：张三)"),
+            ("责编：张三(实习", "责编：张三(实习"),
+            ("前言责编：张三", "前言责编：张三"),
+            ("(张三)", "(张三)"),
+            ("不明", "不明"),
+            ("(责编：实习生)", "实习生"),
+            ("责编：责编：张三", "责编：责编：张三"),
+            ("(责编：(责编：张三))", "(责编：(责编：张三))"),
+            ("（责编：（责任编辑：张三））", "（责编：（责任编辑：张三））"),
+        )
+        for source, expected in cases:
+            with self.subTest(source=source):
+                normalized = corpus.normalize_editor(source)
+                self.assertEqual(normalized, expected)
+                self.assertEqual(corpus.normalize_editor(normalized), normalized)
+
+    def test_boundary_trim_only_and_literal_entities_are_preserved(self):
+        self.assertEqual(corpus.normalize_editor("\u3000张 三\t"), "张 三")
+        self.assertEqual(corpus.normalize_editor("A&amp;B"), "A&amp;B")
+        with self.assertRaises(TypeError):
+            corpus.normalize_editor(None)
+
+
 class RecordValidationTests(unittest.TestCase):
     def test_canonical_id_and_exact_schema(self):
         self.assertEqual(corpus.canonical_id("123"), "123")
@@ -75,6 +112,14 @@ class RecordValidationTests(unittest.TestCase):
         self.assertEqual(corpus.canonical_record(historical)["text"], [])
         with self.assertRaises(corpus.CorpusError):
             corpus.canonical_record(historical, strict_content=True)
+
+    def test_strict_editor_requires_canonical_value_without_mutating_history(self):
+        wrapped = full_record()
+        wrapped["editor"] = "(责编：张三)"
+        self.assertEqual(corpus.canonical_record(wrapped)["editor"], "(责编：张三)")
+        with self.assertRaisesRegex(corpus.CorpusError, "editor must already be canonical"):
+            corpus.canonical_record(wrapped, strict_content=True)
+        self.assertEqual(wrapped["editor"], "(责编：张三)")
 
     def test_new_image_only_record_is_strictly_valid_and_deterministic(self):
         record = image_record()

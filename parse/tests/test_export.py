@@ -98,6 +98,19 @@ class ExportTests(unittest.TestCase):
                              {"sha256": hashlib.sha256(payload).hexdigest(),
                               "bytes": len(payload)})
 
+    def test_historical_editor_value_exports_exactly_without_implicit_normalization(self):
+        historical = full_record("7")
+        historical["editor"] = "(责编：张三   )"
+        corpus.create_articles(self.data, [historical], strict_content=False)
+        output = self.base / "historical-output"
+        exporter.export_corpus(self.data, output, include_full=True, include_archive=True)
+        loaded = corpus.load_articles(self.data)
+        minimal = json.loads((output / exporter.MINIMAL_NAME).read_text(encoding="utf-8"))
+        full = json.loads((output / exporter.FULL_NAME).read_text(encoding="utf-8"))
+        self.assertEqual(loaded["7"]["editor"], historical["editor"])
+        self.assertEqual(minimal["7"]["editor"], historical["editor"])
+        self.assertEqual(full[0]["editor"], historical["editor"])
+
     def test_image_media_survives_minimal_full_and_archive_exports(self):
         record = image_record()
         corpus.create_articles(self.data, [record])

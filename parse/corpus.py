@@ -212,6 +212,64 @@ def _canonical_media(aid: str, record: dict) -> list:
     return ordered
 
 
+def normalize_editor(value: str) -> str:
+    """Remove one unambiguous editor-label wrapper from parsed text.
+
+    Only boundary whitespace and the recognized presentation syntax are
+    removed.  Values whose first normalization would expose another such
+    prefix are ambiguous and are preserved, making this operation genuinely
+    idempotent without repeatedly stripping possible semantic payload.
+    """
+    if not isinstance(value, str):
+        raise TypeError("editor must be a string")
+
+    trimmed = value.strip()
+
+    def parentheses_well_formed(text: str) -> bool:
+        pairs = {"(": ")", "（": "）"}
+        stack = []
+        for character in text:
+            if character in pairs:
+                stack.append(pairs[character])
+            elif character in pairs.values():
+                if not stack or character != stack.pop():
+                    return False
+        return not stack
+
+    def matching_outer_pair(text: str) -> bool:
+        pairs = {"(": ")", "（": "）"}
+        if len(text) < 2 or text[0] not in pairs:
+            return False
+        stack = []
+        for index, character in enumerate(text):
+            if character in pairs:
+                stack.append(pairs[character])
+            elif character in pairs.values():
+                if not stack or character != stack.pop():
+                    return False
+                if not stack and index != len(text) - 1:
+                    return False
+        return not stack
+
+    def strip_once(text: str) -> str:
+        if not parentheses_well_formed(text):
+            return text
+        candidate = text
+        if matching_outer_pair(candidate):
+            interior = candidate[1:-1]
+            if re.match(r"^(?:责任编辑|责编|编辑)[:：]", interior):
+                candidate = interior
+        match = re.match(r"^(?:责任编辑|责编|编辑)[:：]", candidate)
+        if match is None:
+            return candidate
+        return candidate[match.end():].strip()
+
+    normalized = strip_once(trimmed)
+    if normalized != strip_once(normalized):
+        return trimmed
+    return normalized
+
+
 def canonical_record(record, strict_content: bool = False, import_ids: bool = False) -> dict:
     """Validate and order one full record without changing its field values.
 
@@ -244,6 +302,8 @@ def canonical_record(record, strict_content: bool = False, import_ids: bool = Fa
         for field in ("title", "date", "editor", "article"):
             if not record[field].strip():
                 raise CorpusError("New article {} field {} must not be empty".format(aid, field))
+        if record["editor"] != normalize_editor(record["editor"]):
+            raise CorpusError("New article {} editor must already be canonical".format(aid))
         if is_error_shell(text):
             raise CorpusError("New article {} is an error or challenge page".format(aid))
         if not has_media and (not text or any(not line.strip() for line in text)):
