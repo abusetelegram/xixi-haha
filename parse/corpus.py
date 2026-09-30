@@ -17,9 +17,14 @@ import sys
 import tarfile
 import tempfile
 from typing import Iterable, Mapping
+from urllib.parse import urljoin, urlsplit
+
+from bs4 import BeautifulSoup
 
 
-FIELDS = ("id", "title", "date", "author", "editor", "article", "text")
+BASE_FIELDS = ("id", "title", "date", "author", "editor", "article", "text")
+MEDIA_FIELDS = ("content_type", "media")
+FIELDS = BASE_FIELDS
 MINIMAL_FIELDS = ("title", "date", "author", "editor", "text")
 TEMPLATE_DIR = Path(__file__).resolve().parent / "data-branch-template"
 MAX_ARCHIVE_MEMBER_BYTES = 1024 * 1024 * 1024
@@ -78,6 +83,79 @@ def read_json(path: Path):
     return _load_json_text(text, str(path))
 
 
+def article_image_media(article: str, aid: str) -> list:
+    """Return validated image evidence from a canonical article-body fragment."""
+    body = BeautifulSoup(article, "html.parser").select_one(".d2txt_con")
+    if body is None:
+        raise CorpusError("Image-only article {} has no canonical article body".format(aid))
+    base_url = "http://jhsjk.people.cn/article/" + aid
+    media = []
+    for image in body.find_all("img"):
+        source = image.get("src")
+        if not isinstance(source, str) or not source.strip():
+            raise CorpusError("Image-only article {} has an image without a source".format(aid))
+        try:
+            url = urljoin(base_url, source.strip())
+            parsed = urlsplit(url)
+            safe = (parsed.scheme in ("http", "https") and parsed.hostname
+                    and parsed.username is None and parsed.password is None
+                    and not any(character.isspace() for character in url))
+        except ValueError:
+            safe = False
+        if not safe:
+            raise CorpusError("Image-only article {} has an unsafe image URL".format(aid))
+        dimensions = []
+        for name in ("width", "height"):
+            value = image.get(name)
+            if isinstance(value, str) and value.strip().isdigit():
+                dimensions.append(int(value.strip()))
+        if dimensions and min(dimensions) <= 1:
+            continue
+        alt = image.get("alt", "")
+        if not isinstance(alt, str):
+            raise CorpusError("Image-only article {} has invalid image alt text".format(aid))
+        media.append({"type": "image", "url": url, "alt": alt})
+    return media
+
+
+def _canonical_media(aid: str, record: dict) -> list:
+    """Validate the deliberately narrow image-only media extension."""
+    if record.get("content_type") != "image":
+        raise CorpusError("Article {} content_type must be image".format(aid))
+    media = record.get("media")
+    if not isinstance(media, list) or not media:
+        raise CorpusError("Article {} media must be a nonempty array".format(aid))
+    ordered = []
+    for index, item in enumerate(media):
+        if (not isinstance(item, dict)
+                or set(item) != {"type", "url", "alt"} or len(item) != 3):
+            raise CorpusError(
+                "Article {} media item {} must contain exactly: type, url, alt".format(
+                    aid, index))
+        if item["type"] != "image":
+            raise CorpusError("Article {} media item {} type must be image".format(aid, index))
+        url = item["url"]
+        if not isinstance(url, str) or not re.fullmatch(r"https?://[^\s]+", url):
+            raise CorpusError(
+                "Article {} media item {} URL must be absolute HTTP(S)".format(aid, index))
+        try:
+            parsed = urlsplit(url)
+            safe = (parsed.hostname and parsed.username is None and parsed.password is None
+                    and parsed.scheme in ("http", "https"))
+        except ValueError:
+            safe = False
+        if not safe:
+            raise CorpusError(
+                "Article {} media item {} URL is unsafe".format(aid, index))
+        if not isinstance(item["alt"], str):
+            raise CorpusError("Article {} media item {} alt must be a string".format(aid, index))
+        ordered.append({"type": "image", "url": url, "alt": item["alt"]})
+    evidence = article_image_media(record["article"], aid)
+    if not evidence or evidence != ordered:
+        raise CorpusError("Article {} media does not match its article body".format(aid))
+    return ordered
+
+
 def canonical_record(record, strict_content: bool = False, import_ids: bool = False) -> dict:
     """Validate and order one full record without changing its field values.
 
@@ -88,29 +166,47 @@ def canonical_record(record, strict_content: bool = False, import_ids: bool = Fa
     """
     if not isinstance(record, dict):
         raise CorpusError("Article record must be a JSON object")
-    if set(record) != set(FIELDS) or len(record) != len(FIELDS):
-        raise CorpusError("Article record must contain exactly: {}".format(", ".join(FIELDS)))
+    keys = set(record)
+    base_keys = set(BASE_FIELDS)
+    media_keys = base_keys | set(MEDIA_FIELDS)
+    if keys not in (base_keys, media_keys) or len(record) != len(keys):
+        raise CorpusError(
+            "Article record must contain exactly the base fields, with optional paired "
+            "content_type and media")
+    has_media = keys == media_keys
     aid = normalize_id(record["id"]) if import_ids else canonical_id(record["id"])
-    for field in FIELDS[1:-1]:
+    for field in BASE_FIELDS[1:-1]:
         if not isinstance(record[field], str):
             raise CorpusError("Article {} field {} must be a string".format(aid, field))
     text = record["text"]
     if not isinstance(text, list) or not all(isinstance(line, str) for line in text):
         raise CorpusError("Article {} text must be an array of strings".format(aid))
+    media = _canonical_media(aid, record) if has_media else None
+    if has_media and text:
+        raise CorpusError("Image-only article {} text must be empty".format(aid))
     if strict_content:
         for field in ("title", "date", "editor", "article"):
             if not record[field].strip():
                 raise CorpusError("New article {} field {} must not be empty".format(aid, field))
-        if not text or any(not line.strip() for line in text):
-            raise CorpusError("New article {} must have nonempty text lines".format(aid))
+        if not has_media and (not text or any(not line.strip() for line in text)):
+            raise CorpusError(
+                "New article {} must have nonempty text or validated image media".format(aid))
     ordered = {"id": aid}
-    for field in FIELDS[1:]:
+    for field in BASE_FIELDS[1:]:
         ordered[field] = record[field]
+    if has_media:
+        ordered["content_type"] = "image"
+        ordered["media"] = media
     return ordered
 
 
 def minimal_record(record) -> dict:
-    return {field: record[field] for field in MINIMAL_FIELDS}
+    minimal = {field: record[field] for field in MINIMAL_FIELDS}
+    if "content_type" in record or "media" in record:
+        canonical = canonical_record(record)
+        minimal["content_type"] = canonical["content_type"]
+        minimal["media"] = canonical["media"]
+    return minimal
 
 
 def serialize_record(record, strict_content: bool = False) -> bytes:

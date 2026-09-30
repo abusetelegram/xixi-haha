@@ -24,6 +24,16 @@ def full_record(aid="1", text=None):
     }
 
 
+def image_record(aid="40140589"):
+    result = full_record(aid, text=[])
+    result["article"] = ('<div class="d2txt_con"><img alt="" '
+                         'src="https://example.invalid/article.jpg"/></div>')
+    result["content_type"] = "image"
+    result["media"] = [{
+        "type": "image", "url": "https://example.invalid/article.jpg", "alt": ""}]
+    return result
+
+
 class ExportTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -85,6 +95,22 @@ class ExportTests(unittest.TestCase):
             self.assertEqual(metadata,
                              {"sha256": hashlib.sha256(payload).hexdigest(),
                               "bytes": len(payload)})
+
+    def test_image_media_survives_minimal_full_and_archive_exports(self):
+        record = image_record()
+        corpus.create_articles(self.data, [record])
+        output = self.base / "media-output"
+        exporter.export_corpus(
+            self.data, output, include_full=True, include_archive=True)
+        minimal = json.loads((output / exporter.MINIMAL_NAME).read_text(encoding="utf-8"))
+        self.assertEqual(minimal["40140589"]["content_type"], "image")
+        self.assertEqual(minimal["40140589"]["media"], record["media"])
+        self.assertEqual(minimal["40140589"]["text"], [])
+        full = json.loads((output / exporter.FULL_NAME).read_text(encoding="utf-8"))
+        self.assertEqual(full, [record])
+        with tarfile.open(output / exporter.ARCHIVE_NAME, "r:gz") as archive:
+            archived = json.load(archive.extractfile(exporter.FULL_NAME))
+        self.assertEqual(archived, [record])
 
     def test_schema_and_filename_failures_leave_existing_output_untouched(self):
         for failure in ("schema", "filename"):

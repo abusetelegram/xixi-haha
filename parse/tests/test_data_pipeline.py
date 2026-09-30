@@ -38,6 +38,17 @@ def record(aid):
     }
 
 
+def image_record(aid):
+    result = record(aid)
+    result["article"] = ('<div class="d2txt_con"><img alt="" '
+                         'src="https://example.invalid/article.jpg"/></div>')
+    result["text"] = []
+    result["content_type"] = "image"
+    result["media"] = [{
+        "type": "image", "url": "https://example.invalid/article.jpg", "alt": ""}]
+    return result
+
+
 class DataPipelineTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -165,6 +176,18 @@ class DataPipelineTests(unittest.TestCase):
                 self.start_sha, SOURCE_SHA, "https://example.invalid/run/strict")
         self.assertEqual(self.start_sha, run("git", "-C", str(checkout), "rev-parse", "HEAD"))
         self.assertEqual("", run("git", "-C", str(checkout), "diff", "--cached", "--name-only"))
+
+    def test_new_image_only_article_passes_strict_publication_validation(self):
+        checkout = self.clone("strict-image")
+        media = image_record(2)
+        (checkout / "articles" / "2.json").write_bytes(
+            corpus.serialize_record(media, strict_content=True))
+        result = data_pipeline.publish_changes(
+            checkout, self.report(self.root, known=1, added=1, records=2),
+            self.start_sha, SOURCE_SHA, "https://example.invalid/run/image", dry_run=True)
+        self.assertEqual("dry-run", result["status"])
+        self.assertTrue(result["changed"])
+        self.assertEqual(self.start_sha, run("git", "-C", str(checkout), "rev-parse", "HEAD"))
 
     def test_edit_between_validation_and_staging_is_rejected_and_unstaged(self):
         checkout = self.clone("stage-race")

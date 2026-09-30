@@ -15,6 +15,7 @@ import update
 FIXTURES = Path(__file__).parent / "fixtures"
 CURRENT = (FIXTURES / "current.html").read_text(encoding="utf-8")
 LEGACY = (FIXTURES / "legacy.html").read_text(encoding="utf-8")
+IMAGE_ONLY = (FIXTURES / "image-only-40140589.html").read_text(encoding="utf-8")
 
 
 def entry(aid, title=" 标题 "):
@@ -62,6 +63,7 @@ class ParsingTests(unittest.TestCase):
                                           "《 人民日报 》（ 2026年09月24日 01 版）"])
         self.assertEqual(result["editor"], "(责编：测试)")
         self.assertEqual(result["title"], "标题")
+        self.assertEqual(set(result), set(corpus.BASE_FIELDS))
         self.assertIn("<strong>", result["article"])
         self.assertNotIn("摘要", "".join(result["text"]))
 
@@ -70,8 +72,54 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(result["text"], ["旧版第一段。", "旧版第二段。"])
         self.assertEqual(result["editor"], "不明")
 
+    def test_image_only_article_has_explicit_media_contract(self):
+        source = entry(
+            40140589,
+            title="时习之｜健全城市社区治理体系 习近平牵挂“最后一公里”")
+        source.update(input_date="2023-12-17 09:49:04",
+                      origin_name="人民网-中国共产党新闻网")
+        result = update.parse_article(IMAGE_ONLY, source)
+        self.assertEqual(result, {
+            "id": "40140589",
+            "title": "时习之｜健全城市社区治理体系 习近平牵挂“最后一公里”",
+            "date": "2023-12-17 09:49:04",
+            "author": "人民网-中国共产党新闻网",
+            "editor": "(责编：王潇潇)",
+            "article": ('<div class="d2txt_con clearfix">\n'
+                        '<p><p style="text-align: center;"><img alt="" height="7372" '
+                        'src="https://cpc.people.com.cn/NMediaFile/2023/1216/'
+                        'MAIN170271463331969PTAF569C.jpg" width="700"/></p> </p>\n'
+                        '</div>'),
+            "text": [],
+            "content_type": "image",
+            "media": [{
+                "type": "image",
+                "url": ("https://cpc.people.com.cn/NMediaFile/2023/1216/"
+                        "MAIN170271463331969PTAF569C.jpg"),
+                "alt": "",
+            }],
+        })
+
+    def test_image_only_relative_url_is_normalized_against_article(self):
+        html = '<div class="d2txt_con"><img src="../media/a.jpg" alt="说明"></div>'
+        result = update.parse_article(html, entry(7))
+        self.assertEqual(result["media"], [{
+            "type": "image", "url": "http://jhsjk.people.cn/media/a.jpg", "alt": "说明"}])
+
+    def test_image_only_empty_tracking_malformed_and_unsafe_fail_closed(self):
+        bodies = (
+            '<div class="d2txt_con"></div>',
+            '<div class="d2txt_con"><img></div>',
+            '<div class="d2txt_con"><img src="data:image/png,abc"></div>',
+            '<div class="d2txt_con"><img src="javascript:alert(1)"></div>',
+            '<div class="d2txt_con"><img src="https://example/a" width="1" height="1"></div>',
+        )
+        for html in bodies:
+            with self.subTest(html=html), self.assertRaises(update.FormatError):
+                update.parse_article(html, entry(40140589))
+
     def test_bad_body_is_not_accepted(self):
-        for html in ("<h1>Access denied</h1>", '<div class="d2txt_con"><img src="a"></div>',
+        for html in ("<h1>Access denied</h1>",
                      '<div class="d2txt_con"><script>error()</script></div>'):
             with self.subTest(html=html), self.assertRaises(update.FormatError):
                 update.parse_article(html, entry(1))
