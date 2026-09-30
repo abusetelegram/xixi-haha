@@ -17,11 +17,29 @@ Every mutating command requires an explicit external `--data-dir`.
 ## Data contract
 
 Canonical records are deterministic UTF-8 JSON files at
-`articles/<positive-decimal-id>.json`. Each has exactly `id`, `title`, `date`,
-`author`, `editor`, `article`, and `text`. Routine updates only add files:
-existing article edits and deletions fail validation. Historical values,
-including 29 empty `text` arrays in the original 12,291 records, are preserved;
-new parser-created records must have nonempty text.
+`articles/<positive-decimal-id>.json`. Ordinary records have exactly `id`,
+`title`, `date`, `author`, `editor`, `article`, and `text`. A validated
+image-only record adds `content_type: "image"` and a nonempty `media` array of
+ordered `{type: "image", url: <absolute HTTP(S) URL>, alt: <string>}` objects;
+its `text` is empty. Admission requires a supported raster suffix (`jpg`,
+`jpeg`, `png`, `gif`, `webp`, or `bmp`) after relative URL normalization and
+rejects self/fragment/extensionless sources plus explicit hidden, zero-sized,
+or one-pixel HTML/CSS images. Only URLs and original article-body HTML are
+stored, never remote image bytes; these static checks do not fetch or
+authenticate the referenced bytes. Routine updates only add files: existing
+article edits and deletions fail validation. Historical values, including 29
+empty `text` arrays in the original 12,291 records, are preserved. New
+empty-text records are accepted only with the paired, validated image media
+contract; metadata-only, error, unsafe-image, and tracking-only pages fail
+closed.
+
+Ordinary seven-field records and their five-field minimal projections retain
+byte-identical serialization. Image media is preserved in both minimal and full
+exports so substantive content is not silently discarded. Deploy this
+media-aware code first, then apply the reviewed `schema.json` template update as
+a metadata-only data-branch commit, and only then resume acquisition. Publishing
+a media record before those two steps would break old readers and the old data
+schema.
 
 Caches and listing state are ignored under `.cache/` and `.state/`. Listings are
 stored in `.state/entries.json`; diagnostic API snapshots and validated HTML are

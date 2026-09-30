@@ -25,6 +25,16 @@ def full_record(aid="1", text=None):
     }
 
 
+def image_record(aid="40140589"):
+    result = full_record(aid, text=[])
+    result["article"] = ('<div class="d2txt_con"><img alt="" '
+                         'src="https://example.invalid/article.jpg"/></div>')
+    result["content_type"] = "image"
+    result["media"] = [{
+        "type": "image", "url": "https://example.invalid/article.jpg", "alt": ""}]
+    return result
+
+
 def minimal_record(record):
     return {field: record[field] for field in corpus.MINIMAL_FIELDS}
 
@@ -65,6 +75,81 @@ class RecordValidationTests(unittest.TestCase):
         self.assertEqual(corpus.canonical_record(historical)["text"], [])
         with self.assertRaises(corpus.CorpusError):
             corpus.canonical_record(historical, strict_content=True)
+
+    def test_new_image_only_record_is_strictly_valid_and_deterministic(self):
+        record = image_record()
+        canonical = corpus.canonical_record(record, strict_content=True)
+        self.assertEqual(canonical, record)
+        self.assertEqual(list(canonical), list(corpus.BASE_FIELDS + corpus.MEDIA_FIELDS))
+        self.assertEqual(corpus.minimal_record(record), {
+            "title": record["title"], "date": record["date"],
+            "author": record["author"], "editor": record["editor"], "text": [],
+            "content_type": "image", "media": record["media"],
+        })
+        self.assertEqual(corpus.serialize_record(record, strict_content=True),
+                         corpus.serialize_record(record, strict_content=True))
+
+    def test_media_marker_shape_and_urls_fail_closed(self):
+        valid = image_record()
+        mutations = []
+        missing_media = dict(valid)
+        del missing_media["media"]
+        mutations.append(missing_media)
+        missing_marker = dict(valid)
+        del missing_marker["content_type"]
+        mutations.append(missing_marker)
+        wrong_marker = dict(valid, content_type="video")
+        mutations.append(wrong_marker)
+        with_text = dict(valid, text=["not image-only"])
+        mutations.append(with_text)
+        empty_media = dict(valid, media=[])
+        mutations.append(empty_media)
+        no_body_evidence = dict(valid, article="<div>metadata only</div>")
+        mutations.append(no_body_evidence)
+        wrong_item = dict(valid, media=[{"type": "video", "url": "https://example/a", "alt": ""}])
+        mutations.append(wrong_item)
+        wrong_alt = dict(valid, media=[{"type": "image", "url": "https://example/a", "alt": 1}])
+        mutations.append(wrong_alt)
+        for url in ("", "/relative.jpg", "data:image/png,abc", "javascript:alert(1)",
+                    "https://user@example.invalid/a.jpg", "https://example.invalid/a b.jpg"):
+            mutations.append(dict(valid, media=[{"type": "image", "url": url, "alt": ""}]))
+        for record in mutations:
+            with self.subTest(record=record), self.assertRaises(corpus.CorpusError):
+                corpus.canonical_record(record, strict_content=True)
+
+    def test_strict_placeholder_and_challenge_records_fail_closed(self):
+        aid = "40140589"
+        cases = []
+        for article, url in (
+                ('<div class="d2txt_con"><img src="a"></div>',
+                 "http://jhsjk.people.cn/article/a"),
+                ('<div class="d2txt_con"><img src="#"></div>',
+                 "http://jhsjk.people.cn/article/40140589"),
+                (('<div class="d2txt_con"><img src="https://example.invalid/p.gif" '
+                  'style="width:1px;height:1px"></div>'),
+                 "https://example.invalid/p.gif")):
+            record = full_record(aid, text=[])
+            record["article"] = article
+            record["content_type"] = "image"
+            record["media"] = [{"type": "image", "url": url, "alt": ""}]
+            cases.append(record)
+        challenge = full_record(aid, text=["Access denied"])
+        challenge["article"] = ('<div class="d2txt_con"><h1>Access denied</h1>'
+                                '<img src="/media/error.png"></div>')
+        cases.append(challenge)
+        for record in cases:
+            with self.subTest(record=record), self.assertRaises(corpus.CorpusError):
+                corpus.canonical_record(record, strict_content=True)
+
+    def test_schema_describes_paired_image_extension(self):
+        schema = json.loads((corpus.TEMPLATE_DIR / "schema.json").read_text(encoding="utf-8"))
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(schema["properties"]["content_type"], {"const": "image"})
+        media = schema["properties"]["media"]
+        self.assertEqual(media["minItems"], 1)
+        self.assertEqual(set(media["items"]["required"]), {"type", "url", "alt"})
+        self.assertIn("[jJ][pP]", media["items"]["properties"]["url"]["pattern"])
+        self.assertEqual(schema["oneOf"][1]["properties"]["text"]["maxItems"], 0)
 
     def test_serialization_is_fixed_utf8_pretty_json_with_lf(self):
         payload = corpus.serialize_record(full_record())

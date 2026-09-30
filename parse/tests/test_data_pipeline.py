@@ -38,6 +38,41 @@ def record(aid):
     }
 
 
+def image_record(aid):
+    result = record(aid)
+    result["article"] = ('<div class="d2txt_con"><img alt="" '
+                         'src="https://example.invalid/article.jpg"/></div>')
+    result["text"] = []
+    result["content_type"] = "image"
+    result["media"] = [{
+        "type": "image", "url": "https://example.invalid/article.jpg", "alt": ""}]
+    return result
+
+
+def invalid_placeholder_records(aid):
+    cases = []
+    for article, url in (
+            ('<div class="d2txt_con"><img src="a"></div>',
+             "http://jhsjk.people.cn/article/a"),
+            ('<div class="d2txt_con"><img src="#"></div>',
+             "http://jhsjk.people.cn/article/{}".format(aid)),
+            (('<div class="d2txt_con"><img src="https://example.invalid/p.gif" '
+              'style="width:1px;height:1px"></div>'),
+             "https://example.invalid/p.gif")):
+        candidate = record(aid)
+        candidate["article"] = article
+        candidate["text"] = []
+        candidate["content_type"] = "image"
+        candidate["media"] = [{"type": "image", "url": url, "alt": ""}]
+        cases.append(candidate)
+    challenge = record(aid)
+    challenge["article"] = ('<div class="d2txt_con"><h1>Access denied</h1>'
+                            '<img src="/media/error.png"></div>')
+    challenge["text"] = ["Access denied"]
+    cases.append(challenge)
+    return cases
+
+
 class DataPipelineTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -165,6 +200,26 @@ class DataPipelineTests(unittest.TestCase):
                 self.start_sha, SOURCE_SHA, "https://example.invalid/run/strict")
         self.assertEqual(self.start_sha, run("git", "-C", str(checkout), "rev-parse", "HEAD"))
         self.assertEqual("", run("git", "-C", str(checkout), "diff", "--cached", "--name-only"))
+
+    def test_new_image_only_article_passes_strict_publication_validation(self):
+        checkout = self.clone("strict-image")
+        media = image_record(2)
+        (checkout / "articles" / "2.json").write_bytes(
+            corpus.serialize_record(media, strict_content=True))
+        result = data_pipeline.publish_changes(
+            checkout, self.report(self.root, known=1, added=1, records=2),
+            self.start_sha, SOURCE_SHA, "https://example.invalid/run/image", dry_run=True)
+        self.assertEqual("dry-run", result["status"])
+        self.assertTrue(result["changed"])
+        self.assertEqual(self.start_sha, run("git", "-C", str(checkout), "rev-parse", "HEAD"))
+
+    def test_publication_rejects_placeholder_and_challenge_records(self):
+        for index, candidate in enumerate(invalid_placeholder_records(2)):
+            path = self.root / "invalid-{}.json".format(index)
+            path.write_text(json.dumps(candidate, ensure_ascii=False, indent=2) + "\n",
+                            encoding="utf-8")
+            with self.subTest(index=index), self.assertRaises(corpus.CorpusError):
+                data_pipeline._validated_new_article(path, "2")
 
     def test_edit_between_validation_and_staging_is_rejected_and_unstaged(self):
         checkout = self.clone("stage-race")

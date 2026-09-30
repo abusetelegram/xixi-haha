@@ -38,6 +38,63 @@
       "items": {
         "type": "string"
       }
+    },
+    "content_type": {
+      "const": "image"
+    },
+    "media": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "url",
+          "alt"
+        ],
+        "properties": {
+          "type": {
+            "const": "image"
+          },
+          "url": {
+            "type": "string",
+            "pattern": "^https?://(?![^/\\s]*@)[^\\s?#]+\\.(?:[jJ][pP][eE]?[gG]|[pP][nN][gG]|[gG][iI][fF]|[wW][eE][bB][pP]|[bB][mM][pP])(?:[?#][^\\s]*)?$"
+          },
+          "alt": {
+            "type": "string"
+          }
+        }
+      }
     }
-  }
+  },
+  "oneOf": [
+    {
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "content_type"
+            ]
+          },
+          {
+            "required": [
+              "media"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "required": [
+        "content_type",
+        "media"
+      ],
+      "properties": {
+        "text": {
+          "maxItems": 0
+        }
+      }
+    }
+  ]
 }

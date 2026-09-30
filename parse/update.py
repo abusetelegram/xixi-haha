@@ -17,8 +17,8 @@ from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 from bs4 import BeautifulSoup
 
-from corpus import (CorpusError, create_articles, load_articles, normalize_id,
-                    writer_lock)
+from corpus import (CorpusError, article_image_media, create_articles, is_error_shell,
+                    load_articles, normalize_id, writer_lock)
 
 BASE_URL = "http://jhsjk.people.cn"
 LOGGER = logging.getLogger(__name__)
@@ -96,9 +96,20 @@ def parse_article(html: str, entry: dict) -> dict:
         block.insert_before("\n")
         block.insert_after("\n")
     text = [line.strip() for line in body.get_text().splitlines() if line.strip()]
-    if not text:
-        raise FormatError("Article {} has no readable text".format(entry["article_id"]))
-    return {
+    if is_error_shell(text):
+        raise FormatError("Article {} is an error or challenge page".format(
+            entry["article_id"]))
+    if text:
+        media = []
+    else:
+        try:
+            media = article_image_media(raw_body, entry["article_id"])
+        except CorpusError as exc:
+            raise FormatError(str(exc)) from exc
+    if not text and not media:
+        raise FormatError("Article {} has no readable text or supported image".format(
+            entry["article_id"]))
+    record = {
         "id": entry["article_id"],
         "title": BeautifulSoup(entry["title"], "html.parser").get_text().strip(),
         "date": entry["input_date"],
@@ -107,6 +118,10 @@ def parse_article(html: str, entry: dict) -> dict:
         "article": raw_body,
         "text": text,
     }
+    if media:
+        record["content_type"] = "image"
+        record["media"] = media
+    return record
 
 
 def atomic_write(path: Path, content: str) -> None:
