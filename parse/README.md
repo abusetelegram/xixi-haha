@@ -21,12 +21,17 @@ Canonical records are deterministic UTF-8 JSON files at
 `title`, `date`, `author`, `editor`, `article`, and `text`. A validated
 image-only record adds `content_type: "image"` and a nonempty `media` array of
 ordered `{type: "image", url: <absolute HTTP(S) URL>, alt: <string>}` objects;
-its `text` is empty. Only URLs and original article-body HTML are stored, never
-remote image bytes. Routine updates only add files: existing article edits and
-deletions fail validation. Historical values, including 29 empty `text` arrays
-in the original 12,291 records, are preserved. New empty-text records are
-accepted only with the paired, validated image media contract; metadata-only,
-error, unsafe-image, and tracking-only pages fail closed.
+its `text` is empty. Admission requires a supported raster suffix (`jpg`,
+`jpeg`, `png`, `gif`, `webp`, or `bmp`) after relative URL normalization and
+rejects self/fragment/extensionless sources plus explicit hidden, zero-sized,
+or one-pixel HTML/CSS images. Only URLs and original article-body HTML are
+stored, never remote image bytes; these static checks do not fetch or
+authenticate the referenced bytes. Routine updates only add files: existing
+article edits and deletions fail validation. Historical values, including 29
+empty `text` arrays in the original 12,291 records, are preserved. New
+empty-text records are accepted only with the paired, validated image media
+contract; metadata-only, error, unsafe-image, and tracking-only pages fail
+closed.
 
 Ordinary seven-field records and their five-field minimal projections retain
 byte-identical serialization. Image media is preserved in both minimal and full

@@ -25,12 +25,14 @@ def full_record(aid="1", text=None):
 
 
 def image_record(aid="40140589"):
+    url = ("https://cpc.people.com.cn/NMediaFile/2023/1216/"
+           "MAIN170271463331969PTAF569C.jpg")
     result = full_record(aid, text=[])
-    result["article"] = ('<div class="d2txt_con"><img alt="" '
-                         'src="https://example.invalid/article.jpg"/></div>')
+    result["article"] = ('<div class="d2txt_con clearfix"><p><p>'
+                         '<img alt="" height="7372" src="{}" width="700"/>'
+                         '</p></p></div>').format(url)
     result["content_type"] = "image"
-    result["media"] = [{
-        "type": "image", "url": "https://example.invalid/article.jpg", "alt": ""}]
+    result["media"] = [{"type": "image", "url": url, "alt": ""}]
     return result
 
 

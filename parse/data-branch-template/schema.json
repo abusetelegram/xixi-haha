@@ -59,7 +59,7 @@
           },
           "url": {
             "type": "string",
-            "pattern": "^https?://(?![^/\\s]*@)[^\\s]+$"
+            "pattern": "^https?://(?![^/\\s]*@)[^\\s?#]+\\.(?:[jJ][pP][eE]?[gG]|[pP][nN][gG]|[gG][iI][fF]|[wW][eE][bB][pP]|[bB][mM][pP])(?:[?#][^\\s]*)?$"
           },
           "alt": {
             "type": "string"

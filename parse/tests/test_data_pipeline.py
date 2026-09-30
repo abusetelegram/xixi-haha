@@ -49,6 +49,30 @@ def image_record(aid):
     return result
 
 
+def invalid_placeholder_records(aid):
+    cases = []
+    for article, url in (
+            ('<div class="d2txt_con"><img src="a"></div>',
+             "http://jhsjk.people.cn/article/a"),
+            ('<div class="d2txt_con"><img src="#"></div>',
+             "http://jhsjk.people.cn/article/{}".format(aid)),
+            (('<div class="d2txt_con"><img src="https://example.invalid/p.gif" '
+              'style="width:1px;height:1px"></div>'),
+             "https://example.invalid/p.gif")):
+        candidate = record(aid)
+        candidate["article"] = article
+        candidate["text"] = []
+        candidate["content_type"] = "image"
+        candidate["media"] = [{"type": "image", "url": url, "alt": ""}]
+        cases.append(candidate)
+    challenge = record(aid)
+    challenge["article"] = ('<div class="d2txt_con"><h1>Access denied</h1>'
+                            '<img src="/media/error.png"></div>')
+    challenge["text"] = ["Access denied"]
+    cases.append(challenge)
+    return cases
+
+
 class DataPipelineTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -188,6 +212,14 @@ class DataPipelineTests(unittest.TestCase):
         self.assertEqual("dry-run", result["status"])
         self.assertTrue(result["changed"])
         self.assertEqual(self.start_sha, run("git", "-C", str(checkout), "rev-parse", "HEAD"))
+
+    def test_publication_rejects_placeholder_and_challenge_records(self):
+        for index, candidate in enumerate(invalid_placeholder_records(2)):
+            path = self.root / "invalid-{}.json".format(index)
+            path.write_text(json.dumps(candidate, ensure_ascii=False, indent=2) + "\n",
+                            encoding="utf-8")
+            with self.subTest(index=index), self.assertRaises(corpus.CorpusError):
+                data_pipeline._validated_new_article(path, "2")
 
     def test_edit_between_validation_and_staging_is_rejected_and_unstaged(self):
         checkout = self.clone("stage-race")

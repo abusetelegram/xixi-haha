@@ -28,6 +28,11 @@ FIELDS = BASE_FIELDS
 MINIMAL_FIELDS = ("title", "date", "author", "editor", "text")
 TEMPLATE_DIR = Path(__file__).resolve().parent / "data-branch-template"
 MAX_ARCHIVE_MEMBER_BYTES = 1024 * 1024 * 1024
+SUPPORTED_IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
+ERROR_SHELL_MARKERS = (
+    "access denied", "forbidden", "too many requests", "rate limit",
+    "访问验证", "安全验证", "请求过于频繁", "系统繁忙",
+)
 
 
 class CorpusError(ValueError):
@@ -83,6 +88,48 @@ def read_json(path: Path):
     return _load_json_text(text, str(path))
 
 
+def is_error_shell(lines) -> bool:
+    """Recognize short, obvious upstream denial/challenge bodies."""
+    normalized = " ".join(" ".join(lines).split()).casefold()
+    return (bool(normalized) and len(normalized) <= 200
+            and any(normalized == marker or normalized.startswith(marker + " ")
+                    for marker in ERROR_SHELL_MARKERS))
+
+
+def _small_pixel_dimension(value) -> bool:
+    if not isinstance(value, str):
+        return False
+    match = re.fullmatch(
+        r"\s*([0-9]+(?:\.[0-9]+)?)\s*([a-z%]*)\s*", value.casefold())
+    if match is None:
+        return False
+    number = float(match.group(1))
+    unit = match.group(2)
+    return number == 0 or (number <= 1 and unit in ("", "px"))
+
+
+def _zero_number(value) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"\s*0(?:\.0+)?\s*", value) is not None
+
+
+def _inline_style(image) -> dict:
+    style = image.get("style", "")
+    if not isinstance(style, str):
+        return {}
+    declarations = {}
+    for declaration in style.split(";"):
+        if ":" not in declaration:
+            continue
+        name, value = declaration.split(":", 1)
+        declarations[name.strip().casefold()] = re.sub(
+            r"\s*!important\s*$", "", value.strip().casefold())
+    return declarations
+
+
+def _supported_image_path(parsed) -> bool:
+    return parsed.path.casefold().endswith(SUPPORTED_IMAGE_SUFFIXES)
+
+
 def article_image_media(article: str, aid: str) -> list:
     """Return validated image evidence from a canonical article-body fragment."""
     body = BeautifulSoup(article, "html.parser").select_one(".d2txt_con")
@@ -94,22 +141,31 @@ def article_image_media(article: str, aid: str) -> list:
         source = image.get("src")
         if not isinstance(source, str) or not source.strip():
             raise CorpusError("Image-only article {} has an image without a source".format(aid))
+        source = source.strip()
+        if source.startswith("#"):
+            raise CorpusError("Image-only article {} has a fragment-only image source".format(aid))
         try:
-            url = urljoin(base_url, source.strip())
+            url = urljoin(base_url, source)
             parsed = urlsplit(url)
             safe = (parsed.scheme in ("http", "https") and parsed.hostname
                     and parsed.username is None and parsed.password is None
-                    and not any(character.isspace() for character in url))
+                    and not any(character.isspace() for character in url)
+                    and _supported_image_path(parsed))
         except ValueError:
             safe = False
         if not safe:
-            raise CorpusError("Image-only article {} has an unsafe image URL".format(aid))
-        dimensions = []
-        for name in ("width", "height"):
-            value = image.get(name)
-            if isinstance(value, str) and value.strip().isdigit():
-                dimensions.append(int(value.strip()))
-        if dimensions and min(dimensions) <= 1:
+            raise CorpusError(
+                "Image-only article {} has an unsupported or unsafe image URL".format(aid))
+
+        style = _inline_style(image)
+        hidden = (image.has_attr("hidden")
+                  or style.get("display") == "none"
+                  or style.get("visibility") in ("hidden", "collapse")
+                  or _zero_number(style.get("opacity"))
+                  or any(_small_pixel_dimension(image.get(name))
+                         or _small_pixel_dimension(style.get(name))
+                         for name in ("width", "height")))
+        if hidden:
             continue
         alt = image.get("alt", "")
         if not isinstance(alt, str):
@@ -141,7 +197,7 @@ def _canonical_media(aid: str, record: dict) -> list:
         try:
             parsed = urlsplit(url)
             safe = (parsed.hostname and parsed.username is None and parsed.password is None
-                    and parsed.scheme in ("http", "https"))
+                    and parsed.scheme in ("http", "https") and _supported_image_path(parsed))
         except ValueError:
             safe = False
         if not safe:
@@ -188,6 +244,8 @@ def canonical_record(record, strict_content: bool = False, import_ids: bool = Fa
         for field in ("title", "date", "editor", "article"):
             if not record[field].strip():
                 raise CorpusError("New article {} field {} must not be empty".format(aid, field))
+        if is_error_shell(text):
+            raise CorpusError("New article {} is an error or challenge page".format(aid))
         if not has_media and (not text or any(not line.strip() for line in text)):
             raise CorpusError(
                 "New article {} must have nonempty text or validated image media".format(aid))

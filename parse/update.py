@@ -17,8 +17,8 @@ from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 from bs4 import BeautifulSoup
 
-from corpus import (CorpusError, article_image_media, create_articles, load_articles,
-                    normalize_id, writer_lock)
+from corpus import (CorpusError, article_image_media, create_articles, is_error_shell,
+                    load_articles, normalize_id, writer_lock)
 
 BASE_URL = "http://jhsjk.people.cn"
 LOGGER = logging.getLogger(__name__)
@@ -96,6 +96,9 @@ def parse_article(html: str, entry: dict) -> dict:
         block.insert_before("\n")
         block.insert_after("\n")
     text = [line.strip() for line in body.get_text().splitlines() if line.strip()]
+    if is_error_shell(text):
+        raise FormatError("Article {} is an error or challenge page".format(
+            entry["article_id"]))
     if text:
         media = []
     else:

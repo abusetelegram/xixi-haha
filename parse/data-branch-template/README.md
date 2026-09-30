@@ -13,8 +13,11 @@ upstream article ID in [`articles/`](articles/). The schema is
   arrays, are preserved. A validated image-only record additionally has
   `content_type: "image"` and a nonempty `media` array of
   `{type: "image", url: <absolute HTTP(S) URL>, alt: <string>}` objects in
-  article-body order; its `text` array is empty. The URL and original body HTML
-  are stored, not the remote image bytes.
+  article-body order; its `text` array is empty. Supported sources normalize to
+  HTTP(S) URLs ending in `jpg`, `jpeg`, `png`, `gif`, `webp`, or `bmp` and must
+  not be self/fragment/extensionless, hidden, zero-sized, or one-pixel evidence.
+  The URL and original body HTML are stored, not the remote image bytes; static
+  validation does not fetch or authenticate those bytes.
 - Automation is add-only. It must never edit or delete an existing article.
   Corrections require a separate explicit, reviewed process.
 - Files are deterministic UTF-8 JSON with two-space indentation, LF endings,
@@ -25,9 +28,10 @@ upstream article ID in [`articles/`](articles/). The schema is
 
 The image extension is intentionally narrow: it is emitted only when the
 recognized upstream article body has no readable text and contains a supported
-substantive image. Site chrome, scripts, tracking pixels, unsafe URLs, and
-metadata-only pages do not qualify. Ordinary records retain their original
-seven-field serialization, and historical empty-text records remain unchanged.
+substantive raster image. Site chrome, scripts, short denial/challenge shells,
+tracking pixels, hidden/placeholder sources, unsafe URLs, and metadata-only
+pages do not qualify. Ordinary records retain their original seven-field
+serialization, and historical empty-text records remain unchanged.
 
 Deploy the reader/parser code that understands these optional fields first.
 Then update the data branch's `schema.json` in an explicit reviewed

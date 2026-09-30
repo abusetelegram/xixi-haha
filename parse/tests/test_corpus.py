@@ -117,6 +117,30 @@ class RecordValidationTests(unittest.TestCase):
             with self.subTest(record=record), self.assertRaises(corpus.CorpusError):
                 corpus.canonical_record(record, strict_content=True)
 
+    def test_strict_placeholder_and_challenge_records_fail_closed(self):
+        aid = "40140589"
+        cases = []
+        for article, url in (
+                ('<div class="d2txt_con"><img src="a"></div>',
+                 "http://jhsjk.people.cn/article/a"),
+                ('<div class="d2txt_con"><img src="#"></div>',
+                 "http://jhsjk.people.cn/article/40140589"),
+                (('<div class="d2txt_con"><img src="https://example.invalid/p.gif" '
+                  'style="width:1px;height:1px"></div>'),
+                 "https://example.invalid/p.gif")):
+            record = full_record(aid, text=[])
+            record["article"] = article
+            record["content_type"] = "image"
+            record["media"] = [{"type": "image", "url": url, "alt": ""}]
+            cases.append(record)
+        challenge = full_record(aid, text=["Access denied"])
+        challenge["article"] = ('<div class="d2txt_con"><h1>Access denied</h1>'
+                                '<img src="/media/error.png"></div>')
+        cases.append(challenge)
+        for record in cases:
+            with self.subTest(record=record), self.assertRaises(corpus.CorpusError):
+                corpus.canonical_record(record, strict_content=True)
+
     def test_schema_describes_paired_image_extension(self):
         schema = json.loads((corpus.TEMPLATE_DIR / "schema.json").read_text(encoding="utf-8"))
         self.assertFalse(schema["additionalProperties"])
@@ -124,6 +148,7 @@ class RecordValidationTests(unittest.TestCase):
         media = schema["properties"]["media"]
         self.assertEqual(media["minItems"], 1)
         self.assertEqual(set(media["items"]["required"]), {"type", "url", "alt"})
+        self.assertIn("[jJ][pP]", media["items"]["properties"]["url"]["pattern"])
         self.assertEqual(schema["oneOf"][1]["properties"]["text"]["maxItems"], 0)
 
     def test_serialization_is_fixed_utf8_pretty_json_with_lf(self):

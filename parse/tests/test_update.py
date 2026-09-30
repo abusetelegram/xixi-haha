@@ -112,14 +112,31 @@ class ParsingTests(unittest.TestCase):
             '<div class="d2txt_con"><img></div>',
             '<div class="d2txt_con"><img src="data:image/png,abc"></div>',
             '<div class="d2txt_con"><img src="javascript:alert(1)"></div>',
-            '<div class="d2txt_con"><img src="https://example/a" width="1" height="1"></div>',
+            '<div class="d2txt_con"><img src="https://example/a.png" width="1" height="1"></div>',
+            ('<div class="d2txt_con"><img src="https://example/a.png" '
+             'style="width:0%;height:700px"></div>'),
+            ('<div class="d2txt_con"><img src="https://example/a.png" '
+             'style="display:none"></div>'),
+        )
+        for html in bodies:
+            with self.subTest(html=html), self.assertRaises(update.FormatError):
+                update.parse_article(html, entry(40140589))
+
+    def test_placeholder_and_image_bearing_challenge_shells_fail_closed(self):
+        bodies = (
+            '<div class="d2txt_con"><img src="a"></div>',
+            '<div class="d2txt_con"><img src="#"></div>',
+            ('<div class="d2txt_con"><img src="https://example.invalid/p.gif" '
+             'style="width:1px;height:1px"></div>'),
+            ('<div class="d2txt_con"><h1>Access denied</h1>'
+             '<img src="/media/error.png"></div>'),
         )
         for html in bodies:
             with self.subTest(html=html), self.assertRaises(update.FormatError):
                 update.parse_article(html, entry(40140589))
 
     def test_bad_body_is_not_accepted(self):
-        for html in ("<h1>Access denied</h1>",
+        for html in ("<h1>Access denied</h1>", '<div class="d2txt_con"><img src="a"></div>',
                      '<div class="d2txt_con"><script>error()</script></div>'):
             with self.subTest(html=html), self.assertRaises(update.FormatError):
                 update.parse_article(html, entry(1))
