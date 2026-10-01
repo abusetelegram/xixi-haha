@@ -1,5 +1,5 @@
 export { AssetRepository, type AssetFetch, type AssetRepositoryOptions, type ContentHasher } from "./asset-repository";
-export { AssetValidationError, EmptyCorpusError } from "./errors";
+export { AssetLoadCapacityError, AssetValidationError, EmptyCorpusError } from "./errors";
 export {
   decodeParagraphIndex,
   locateArticleRank,

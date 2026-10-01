@@ -5,6 +5,8 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 UPDATE = (ROOT / ".github/workflows/update-data.yml").read_text(encoding="utf-8")
 DOCKER = (ROOT / ".github/workflows/docker-telegram.yml").read_text(encoding="utf-8")
+PARSER_TESTS = (ROOT / ".github/workflows/parse-tests.yml").read_text(encoding="utf-8")
+PARSER_LIVE = (ROOT / ".github/workflows/parser-live-smoke.yml").read_text(encoding="utf-8")
 README = (ROOT / "parse/README.md").read_text(encoding="utf-8")
 REPOSITORY = "abusetelegram/xixi-haha"
 DEFAULT_REF = "refs/heads/master"
@@ -56,6 +58,13 @@ def docker_context_is_trusted(event, ref, workflow_ref, source_sha="", data_sha=
         and bool(data_sha)
     )
     return direct or reusable
+
+
+def live_smoke_path_matches(path):
+    if path in {"parse/corpus.py", "parse/update.py", "parse/tests/live_smoke.py"}:
+        return True
+    prefix = "parse/tests/fixtures/"
+    return path.startswith(prefix) and not path[len(prefix):].startswith("worker-")
 
 
 class WorkflowTrustTests(unittest.TestCase):
@@ -128,6 +137,37 @@ class WorkflowTrustTests(unittest.TestCase):
         self.assertNotIn("secrets: inherit", UPDATE)
         self.assertIn("DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}", UPDATE)
         self.assertIn("DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}", UPDATE)
+
+    def test_live_smoke_trigger_isolated_from_worker_and_workflow_changes(self):
+        current_stack_paths = (
+            ".github/workflows/worker-core-tests.yml",
+            ".github/workflows/parser-live-smoke.yml",
+            "worker/src/asset-repository.ts",
+            "docs/worker-data-format.md",
+            "parse/export_worker.py",
+            "parse/tests/test_export_worker.py",
+            "parse/tests/fixtures/worker-index-v1.bin",
+            "parse/tests/fixtures/worker-selectable-v1.json",
+        )
+        for path in current_stack_paths:
+            with self.subTest(path=path):
+                self.assertFalse(live_smoke_path_matches(path))
+        for path in (
+                "parse/corpus.py", "parse/update.py", "parse/tests/live_smoke.py",
+                "parse/tests/fixtures/upstream-page.html"):
+            with self.subTest(path=path):
+                self.assertTrue(live_smoke_path_matches(path))
+
+    def test_live_smoke_workflow_contract(self):
+        self.assertIn("workflow_dispatch:", PARSER_LIVE)
+        self.assertNotIn(".github/workflows", PARSER_LIVE)
+        self.assertIn("- 'parse/corpus.py'", PARSER_LIVE)
+        self.assertIn("- 'parse/update.py'", PARSER_LIVE)
+        self.assertIn("- '!parse/tests/fixtures/worker-*'", PARSER_LIVE)
+        self.assertIn("python parse/tests/live_smoke.py", PARSER_LIVE)
+        self.assertNotIn("live_smoke.py", PARSER_TESTS)
+        self.assertIn(".github/workflows/*.yml", PARSER_TESTS)
+        self.assertIn("python -m unittest discover -s parse/tests -v", PARSER_TESTS)
 
     def test_full_scan_uses_cautious_pacing(self):
         self.assertIn(

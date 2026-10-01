@@ -1,4 +1,4 @@
-import { AssetValidationError } from "./errors";
+import { AssetLoadCapacityError, AssetValidationError } from "./errors";
 import { decodeParagraphIndex, type ParagraphIndex } from "./index";
 import { isSelectableParagraph } from "./selection";
 import type { Article, CorpusProvenance, MediaItem } from "./types";
@@ -265,23 +265,40 @@ function parseArticle(value: unknown): Article {
   return article;
 }
 
-class PromiseLru<K, V> {
-  private readonly values = new Map<K, Promise<V>>();
-  constructor(private readonly maximum: number) {}
+class BoundedAsyncLru<K, V> {
+  private readonly fulfilled = new Map<K, V>();
+  private readonly pending = new Map<K, Promise<V>>();
+
+  constructor(private readonly maximumFulfilled: number, private readonly maximumPending: number) {}
 
   get(key: K, load: () => Promise<V>): Promise<V> {
-    const present = this.values.get(key);
-    if (present !== undefined) {
-      this.values.delete(key);
-      this.values.set(key, present);
-      return present;
+    const cached = this.fulfilled.get(key);
+    if (cached !== undefined) {
+      this.fulfilled.delete(key);
+      this.fulfilled.set(key, cached);
+      return Promise.resolve(cached);
     }
-    const pending = load();
-    this.values.set(key, pending);
-    while (this.values.size > this.maximum) this.values.delete(this.values.keys().next().value!);
-    void pending.catch(() => {
-      if (this.values.get(key) === pending) this.values.delete(key);
+
+    const existing = this.pending.get(key);
+    if (existing !== undefined) return existing;
+    if (this.pending.size >= this.maximumPending) {
+      return Promise.reject(new AssetLoadCapacityError(
+        `concurrent unique asset load limit ${this.maximumPending} reached`,
+      ));
+    }
+
+    // Defer load until after registration so same-key callers always discover it.
+    const pending = Promise.resolve().then(load).then((value) => {
+      this.fulfilled.delete(key);
+      this.fulfilled.set(key, value);
+      while (this.fulfilled.size > this.maximumFulfilled) {
+        this.fulfilled.delete(this.fulfilled.keys().next().value!);
+      }
+      return value;
+    }).finally(() => {
+      if (this.pending.get(key) === pending) this.pending.delete(key);
     });
+    this.pending.set(key, pending);
     return pending;
   }
 }
@@ -291,6 +308,7 @@ export interface AssetRepositoryOptions {
   origin?: string;
   hash?: ContentHasher;
   shardCacheSize?: number;
+  maxConcurrentShardLoads?: number;
 }
 
 export class AssetRepository {
@@ -298,15 +316,19 @@ export class AssetRepository {
   private readonly origin: string;
   private readonly hash: ContentHasher;
   private statePromise: Promise<LoadedState> | undefined;
-  private readonly shards: PromiseLru<string, Article[]>;
+  private readonly shards: BoundedAsyncLru<string, Article[]>;
 
   constructor(options: AssetRepositoryOptions) {
     this.fetchAsset = options.fetch;
     this.origin = options.origin ?? "https://static-assets.invalid";
     this.hash = options.hash ?? defaultHasher;
     const cacheSize = options.shardCacheSize ?? 2;
+    const maxConcurrent = options.maxConcurrentShardLoads ?? 4;
     if (!Number.isSafeInteger(cacheSize) || cacheSize < 1 || cacheSize > 8) throw new RangeError("shard cache size must be 1..8");
-    this.shards = new PromiseLru(cacheSize);
+    if (!Number.isSafeInteger(maxConcurrent) || maxConcurrent < 2 || maxConcurrent > 8) {
+      throw new RangeError("maximum concurrent shard loads must be 2..8");
+    }
+    this.shards = new BoundedAsyncLru(cacheSize, maxConcurrent);
   }
 
   async provenance(): Promise<CorpusProvenance> {

@@ -1,8 +1,15 @@
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, relative, resolve } from "node:path";
-import { describe, expect, it } from "vitest";
-import { AssetRepository, AssetValidationError, QuoteService, type RandomSource } from "../src/main";
+import { describe, expect, it, vi } from "vitest";
+import {
+  AssetLoadCapacityError,
+  AssetRepository,
+  AssetValidationError,
+  QuoteService,
+  type ContentHasher,
+  type RandomSource,
+} from "../src/main";
 
 const ASSETS = resolve(import.meta.dirname, "generated-assets");
 const encoder = new TextEncoder();
@@ -36,15 +43,25 @@ function resignManifest(files: Map<string, Uint8Array>, mutate: (manifest: any) 
   files.set("worker-data.json", jsonBytes(metadata));
 }
 
+function assetResponse(bytes: Uint8Array): Response {
+  return new Response(new Uint8Array(bytes).buffer as ArrayBuffer, {
+    headers: { "content-length": String(bytes.byteLength) },
+  });
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 function repository(files = fixtureFiles(), cacheSize = 2) {
   const calls = new Map<string, number>();
   const fetch = async (input: RequestInfo | URL): Promise<Response> => {
     const path = new URL(String(input)).pathname.slice(1);
     calls.set(path, (calls.get(path) ?? 0) + 1);
     const bytes = files.get(path);
-    return bytes === undefined ? new Response("missing", { status: 404 }) : new Response(new Uint8Array(bytes).buffer as ArrayBuffer, {
-      headers: { "content-length": String(bytes.byteLength) },
-    });
+    return bytes === undefined ? new Response("missing", { status: 404 }) : assetResponse(bytes);
   };
   return { store: new AssetRepository({ fetch, shardCacheSize: cacheSize }), calls, files };
 }
@@ -64,7 +81,7 @@ describe("AssetRepository generated fixture", () => {
     const article = await store.getArticle(2);
     expect(article).toMatchObject({ id: "2", text: [], content_type: "image", media: [{ alt: "" }] });
     expect([...calls.keys()].map((path) => basename(path)).sort()).toEqual(["manifest.json", "paragraph-index.bin", "worker-data.json", "002.json"].sort());
-    expect(await store.getArticle(3)).toBeUndefined();
+    expect(await store.getArticle(4)).toBeUndefined();
     expect(calls.size).toBe(4);
   });
 
@@ -77,11 +94,108 @@ describe("AssetRepository generated fixture", () => {
     expect(calls.get("_data/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/shards/001.json")).toBe(2);
   });
 
+  it("keeps a slow pending shard discoverable across fulfilled-LRU eviction", async () => {
+    const files = fixtureFiles();
+    const calls = new Map<string, number>();
+    const hashCalls = new Map<string, number>();
+    const gates = new Map([1, 2].map((number) => [
+      `_data/${"b".repeat(40)}/shards/00${number}.json`, deferred(),
+    ]));
+    const hash: ContentHasher = async (bytes) => {
+      const digest = sha(bytes);
+      hashCalls.set(digest, (hashCalls.get(digest) ?? 0) + 1);
+      return digest;
+    };
+    const fetch = async (input: RequestInfo | URL): Promise<Response> => {
+      const path = new URL(String(input)).pathname.slice(1);
+      calls.set(path, (calls.get(path) ?? 0) + 1);
+      const gate = gates.get(path);
+      if (gate !== undefined) await gate.promise;
+      return assetResponse(files.get(path)!);
+    };
+    const store = new AssetRepository({ fetch, hash, shardCacheSize: 1, maxConcurrentShardLoads: 2 });
+    await store.paragraphIndex();
+
+    const firstA = store.getArticle(1);
+    await vi.waitFor(() => expect(calls.get([...gates.keys()][0]!)).toBe(1));
+    const pendingB = store.getArticle(2);
+    await vi.waitFor(() => expect(calls.get([...gates.keys()][1]!)).toBe(1));
+    const secondA = store.getArticle(1);
+    expect(calls.get([...gates.keys()][0]!)).toBe(1);
+
+    gates.get([...gates.keys()][0]!)!.resolve();
+    const [articleA1, articleA2] = await Promise.all([firstA, secondA]);
+    expect(articleA1).toBe(articleA2);
+    expect(hashCalls.get(sha(files.get([...gates.keys()][0]!)!))).toBe(1);
+    gates.get([...gates.keys()][1]!)!.resolve();
+    await pendingB;
+
+    await store.getArticle(1);
+    expect(calls.get([...gates.keys()][0]!)).toBe(2);
+    expect(hashCalls.get(sha(files.get([...gates.keys()][0]!)!))).toBe(2);
+  });
+
+  it("bounds unique pending loads, dedupes same-key requests at capacity, and admits retry", async () => {
+    const files = fixtureFiles();
+    const shardPaths = [1, 2, 3].map((number) => `_data/${"b".repeat(40)}/shards/00${number}.json`);
+    const gates = new Map(shardPaths.map((path) => [path, deferred()]));
+    const calls = new Map<string, number>();
+    let activeShardLoads = 0;
+    let peakShardLoads = 0;
+    const fetch = async (input: RequestInfo | URL): Promise<Response> => {
+      const path = new URL(String(input)).pathname.slice(1);
+      calls.set(path, (calls.get(path) ?? 0) + 1);
+      const gate = gates.get(path);
+      if (gate !== undefined) {
+        activeShardLoads += 1;
+        peakShardLoads = Math.max(peakShardLoads, activeShardLoads);
+        await gate.promise;
+        activeShardLoads -= 1;
+      }
+      return assetResponse(files.get(path)!);
+    };
+    const store = new AssetRepository({ fetch, shardCacheSize: 2, maxConcurrentShardLoads: 2 });
+    await store.paragraphIndex();
+
+    const first = store.getArticle(1);
+    const second = store.getArticle(2);
+    await vi.waitFor(() => expect((calls.get(shardPaths[0]!) ?? 0) + (calls.get(shardPaths[1]!) ?? 0)).toBe(2));
+    const sameKey = store.getArticle(1);
+    await expect(store.getArticle(3)).rejects.toBeInstanceOf(AssetLoadCapacityError);
+    expect(calls.get(shardPaths[2]!)).toBeUndefined();
+
+    gates.get(shardPaths[0]!)!.resolve();
+    const [firstResult, sameKeyResult] = await Promise.all([first, sameKey]);
+    expect(firstResult).toBe(sameKeyResult);
+    const third = store.getArticle(3);
+    await vi.waitFor(() => expect(calls.get(shardPaths[2]!)).toBe(1));
+    gates.get(shardPaths[2]!)!.resolve();
+    gates.get(shardPaths[1]!)!.resolve();
+    await Promise.all([second, third]);
+    expect(Math.max(...shardPaths.map((path) => calls.get(path) ?? 0))).toBe(1);
+    expect(peakShardLoads).toBe(2);
+  });
+
+  it("cleans up rejected pending shard loads so a later request retries", async () => {
+    const files = fixtureFiles();
+    const shardPath = `_data/${"b".repeat(40)}/shards/001.json`;
+    let shardAttempts = 0;
+    const fetch = async (input: RequestInfo | URL): Promise<Response> => {
+      const path = new URL(String(input)).pathname.slice(1);
+      if (path === shardPath && ++shardAttempts === 1) return new Response("busy", { status: 503 });
+      return assetResponse(files.get(path)!);
+    };
+    const store = new AssetRepository({ fetch, shardCacheSize: 1, maxConcurrentShardLoads: 2 });
+    await expect(store.getArticle(1)).rejects.toThrow(/503/);
+    await expect(store.getArticle(1)).resolves.toMatchObject({ id: "1" });
+    expect(shardAttempts).toBe(2);
+  });
+
   it("does not cache failed fetches as correctness state", async () => {
     const { store, files } = repository(new Map());
     await expect(store.paragraphIndex()).rejects.toThrow(AssetValidationError);
     for (const [path, bytes] of fixtureFiles()) files.set(path, bytes);
-    await expect(store.paragraphIndex()).resolves.toMatchObject({ articleCount: 3 });
+    await expect(store.paragraphIndex()).resolves.toMatchObject({ articleCount: 4 });
   });
 
   it("fails closed for checksum, manifest path/count, and shard membership errors", async () => {
@@ -136,7 +250,7 @@ describe("AssetRepository generated fixture", () => {
 describe("QuoteService", () => {
   it("selects globally across unequal counts and returns original paragraph position", async () => {
     const { store } = repository();
-    const quote = await new QuoteService(store, new Sequence([2])).randomQuote();
+    const quote = await new QuoteService(store, new Sequence([3])).randomQuote();
     expect(quote).toEqual({
       quote: "​",
       paragraphIndex: 1,
@@ -149,7 +263,7 @@ describe("QuoteService", () => {
 
   it("supports uniform selectable-article weighting without selecting empties", async () => {
     const { store } = repository();
-    const quote = await new QuoteService(store, new Sequence([0, 1])).randomQuote("article");
+    const quote = await new QuoteService(store, new Sequence([3, 1])).randomQuote("article");
     expect(quote.quote).toBe("second");
     expect(quote.paragraphIndex).toBe(3);
     expect(quote.article.id).toBe("1");
