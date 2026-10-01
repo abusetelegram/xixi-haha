@@ -22,6 +22,22 @@ const article = await repository.getArticle("40140589");  // full projection, in
 
 `AssetRepository` strictly checks deployment metadata, manifest SHA/version/provenance, big-endian index size/counts/ranges, shard checksums/paths/membership, record schemas, and per-article selectable counts. It cold-loads only the small manifest/index and one selected shard. A version-keyed fulfilled-value LRU (default two shards, configurable 1–8) is separate from the bounded in-flight registry (default four unique shard loads, configurable 2–8). Same-key work always deduplicates, including across LRU eviction; failure is cleaned up for retry. Excess different-key concurrency throws retryable `AssetLoadCapacityError` before fetching. HTTP and Telegram adapters must map that overload to a retryable `503` rather than silently selecting another asset/version.
 
+## Telegram webhook
+
+`POST /telegram/webhook` is a native, framework-free Telegram adapter over the same `QuoteService` used by the HTTP API. It supports `/start`, `/yiyan`, and inline queries. Commands explicitly addressed to another bot and all ambient text are ignored with `200`; the adapter does not implement keyword or novelty replies. Message commands retain reply context, and every quote includes linked source attribution. HTML is escaped, and overlong text is truncated by Unicode code point while reserving attribution inside Telegram's 4096-character limit.
+
+The webhook requires all three bindings below. `BOT_USERNAME` is non-secret public configuration and is pinned to the repository's documented bot name in `wrangler.jsonc`. The other two values are secrets and must never be placed in source, Static Assets, logs, or plain Wrangler variables:
+
+- `BOT_TOKEN`: Telegram Bot API token.
+- `TELEGRAM_WEBHOOK_SECRET`: a fresh high-entropy 32–256 character value using letters, digits, `_`, or `-`.
+- `BOT_USERNAME`: `xixi_haha_bot` (without `@`).
+
+Configuration and registration are deliberate operator actions; this repository does not perform them. After an authorized deployment, an operator must provision both secrets through the approved Cloudflare secret mechanism and explicitly call Telegram's `setWebhook` for the exact public `https://<worker-host>/telegram/webhook` URL, supplying the same value as `secret_token`. Do not put either secret in a command transcript; use protected environment/input handling. Registration should request only `message` and `inline_query` updates. The endpoint returns `503` until all configuration is present.
+
+Webhook authentication is checked before the body is read. Bodies are stream-limited to 64 KiB. Outbound calls are restricted to HTTPS `api.telegram.org` `sendMessage` and `answerInlineQuery`, have a five-second timeout, and are attempted once: Telegram `429` becomes retryable `503` with bounded `Retry-After`, timeout becomes `504`, and other Bot API failures become `502`. There is no arbitrary method proxy, sleep, or internal retry loop.
+
+Processing is stateless and at-least-once. Telegram may redeliver an update after a timeout or non-2xx response, so duplicate bot replies are possible. No durable deduplication store is claimed or configured in this slice.
+
 ## HTTP routes
 
 - `GET /` returns a uniformly selected paragraph as UTF-8 plain text.
