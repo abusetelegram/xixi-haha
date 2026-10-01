@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { AssetLoadCapacityError } from "../src/errors";
 import { formatQuoteHtml, logicalHtmlTextLengthForTest, stableInlineResultId, TELEGRAM_MESSAGE_LIMIT } from "../src/telegram/format";
 import { createTelegramHandler, TELEGRAM_BODY_LIMIT, type TelegramConfig } from "../src/telegram/handler";
+import { TELEGRAM_RESPONSE_BODY_LIMIT } from "../src/telegram/transport";
 import type { Quote } from "../src/types";
 import { createWorkerHandler } from "../src/worker";
 
@@ -160,26 +161,55 @@ describe("Telegram webhook", () => {
     expect(payload.results[0].input_message_content.message_text).toContain("来源：");
   });
 
-  it("propagates rate limiting once with bounded Retry-After and maps other failures", async () => {
-    const limited = mockDependencies(new Response(JSON.stringify({ parameters: { retry_after: 99999 } }), { status: 429 }));
-    const limitedResponse = await limited.handler(webhook(message("/yiyan")), CONFIG);
-    expect(limitedResponse.status).toBe(503);
-    expect(limitedResponse.headers.get("retry-after")).toBe("3600");
-    expect(limited.telegramFetch).toHaveBeenCalledTimes(1);
+  it("requires an HTTP-successful ok:true Telegram response envelope", async () => {
+    const success = mockDependencies(new Response(JSON.stringify({ ok: true, result: {} })));
+    expect((await success.handler(webhook(message("/start")), CONFIG)).status).toBe(200);
 
-    const failed = mockDependencies(new Response("bad gateway", { status: 500 }));
-    expect((await failed.handler(webhook(message("/start")), CONFIG)).status).toBe(502);
-    expect(failed.telegramFetch).toHaveBeenCalledTimes(1);
+    for (const body of [JSON.stringify({ ok: false, error_code: 400 }), "not json", ""]) {
+      const invalid = mockDependencies(new Response(body, { status: 200 }));
+      expect((await invalid.handler(webhook(message("/start")), CONFIG)).status).toBe(502);
+      expect(invalid.telegramFetch).toHaveBeenCalledTimes(1);
+    }
+
+    const misleading = mockDependencies(new Response(JSON.stringify({ ok: true }), { status: 500 }));
+    expect((await misleading.handler(webhook(message("/start")), CONFIG)).status).toBe(502);
   });
 
-  it("times out one stalled Bot API call without retrying", async () => {
+  it("propagates envelope and HTTP rate limiting once with bounded Retry-After", async () => {
+    const envelopeLimited = mockDependencies(new Response(JSON.stringify({
+      ok: false, error_code: 429, parameters: { retry_after: 99999 },
+    })));
+    const envelopeResponse = await envelopeLimited.handler(webhook(message("/yiyan")), CONFIG);
+    expect(envelopeResponse.status).toBe(503);
+    expect(envelopeResponse.headers.get("retry-after")).toBe("3600");
+    expect(envelopeLimited.telegramFetch).toHaveBeenCalledTimes(1);
+
+    const httpLimited = mockDependencies(new Response("not json", { status: 429, headers: { "Retry-After": "17" } }));
+    const httpResponse = await httpLimited.handler(webhook(message("/yiyan")), CONFIG);
+    expect(httpResponse.status).toBe(503);
+    expect(httpResponse.headers.get("retry-after")).toBe("17");
+    expect(httpLimited.telegramFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an oversized Telegram response envelope without retrying", async () => {
+    const oversized = mockDependencies(new Response(JSON.stringify({ ok: true, padding: "x".repeat(TELEGRAM_RESPONSE_BODY_LIMIT) })));
+    expect((await oversized.handler(webhook(message("/start")), CONFIG)).status).toBe(502);
+    expect(oversized.telegramFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("times out one stalled Bot API call, including a stalled response body, without retrying", async () => {
     const randomQuote = vi.fn(async () => QUOTE);
-    const telegramFetch = vi.fn<typeof fetch>(async (_input, init) => new Promise<Response>((_resolve, reject) => {
+    const stalledHeaders = vi.fn<typeof fetch>(async (_input, init) => new Promise<Response>((_resolve, reject) => {
       init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
     }));
-    const handler = createTelegramHandler({ quoteService: { randomQuote }, fetch: telegramFetch, timeoutMs: 1 });
-    expect((await handler(webhook(message("/yiyan")), CONFIG)).status).toBe(504);
-    expect(telegramFetch).toHaveBeenCalledTimes(1);
+    const headerHandler = createTelegramHandler({ quoteService: { randomQuote }, fetch: stalledHeaders, timeoutMs: 1 });
+    expect((await headerHandler(webhook(message("/yiyan")), CONFIG)).status).toBe(504);
+    expect(stalledHeaders).toHaveBeenCalledTimes(1);
+
+    const stalledBody = vi.fn<typeof fetch>(async () => new Response(new ReadableStream<Uint8Array>({ start() {} })));
+    const bodyHandler = createTelegramHandler({ quoteService: { randomQuote }, fetch: stalledBody, timeoutMs: 1 });
+    expect((await bodyHandler(webhook(message("/yiyan")), CONFIG)).status).toBe(504);
+    expect(stalledBody).toHaveBeenCalledTimes(1);
   });
 
   it("maps core capacity to 503 without selecting a fallback quote", async () => {
