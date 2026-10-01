@@ -9,12 +9,15 @@
   "scripts": {
     "fixtures": "python3 scripts/generate-test-assets.py",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:runtime": "node scripts/runtime-test.mjs",
+    "package:dry-run": "wrangler deploy --dry-run --outdir dist"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "4.20250924.0",
+    "@cloudflare/workers-types": "5.20260930.2",
     "@types/node": "22.18.6",
     "typescript": "5.9.2",
-    "vitest": "3.2.4"
+    "vitest": "5.0.3",
+    "wrangler": "4.145.0"
   }
 }

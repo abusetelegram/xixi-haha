@@ -323,6 +323,16 @@ export interface AssetRepositoryOptions {
   maxConcurrentShardLoads?: number;
 }
 
+export interface CorpusInfo extends CorpusProvenance {
+  formatVersion: number;
+  counts: {
+    articles: number;
+    selectableArticles: number;
+    sourceParagraphs: number;
+    selectableParagraphs: number;
+  };
+}
+
 export class AssetRepository {
   private readonly fetchAsset: AssetFetch;
   private readonly origin: string;
@@ -350,6 +360,16 @@ export class AssetRepository {
 
   async paragraphIndex(): Promise<ParagraphIndex> {
     return (await this.state()).index;
+  }
+
+  async corpusInfo(): Promise<CorpusInfo> {
+    const { metadata, manifest } = await this.state();
+    return {
+      formatVersion: metadata.formatVersion,
+      sourceSha: metadata.sourceSha,
+      dataSha: metadata.dataSha,
+      counts: { ...manifest.counts },
+    };
   }
 
   async getArticle(id: number | string): Promise<Article | undefined> {

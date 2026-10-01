@@ -1,4 +1,4 @@
-export { AssetRepository, type AssetFetch, type AssetRepositoryOptions, type ContentHasher } from "./asset-repository";
+export { AssetRepository, type AssetFetch, type AssetRepositoryOptions, type ContentHasher, type CorpusInfo } from "./asset-repository";
 export { AssetLoadCapacityError, AssetValidationError, EmptyCorpusError } from "./errors";
 export {
   decodeParagraphIndex,
