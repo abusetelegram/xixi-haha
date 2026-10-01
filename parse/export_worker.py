@@ -8,6 +8,7 @@ HTML from every emitted record.
 
 import argparse
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ import re
 import shutil
 import struct
 import subprocess
+import tarfile
 import tempfile
 from typing import Mapping
 
@@ -24,7 +26,9 @@ FORMAT_VERSION = 1
 DEFAULT_SHARDS = 256
 UINT32_MAX = (1 << 32) - 1
 MAX_ASSET_BYTES = 25 * 1024 * 1024
+MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_ASSET_FILES = 20_000
+MAX_SHARDS = 4096
 INDEX_MAGIC = b"XHPI"
 INDEX_HEADER = struct.Struct(">4sIII")  # magic, format, record count, selectable count
 INDEX_ENTRY = struct.Struct(">II")     # article id, cumulative selectable offset
@@ -58,21 +62,61 @@ def _require_sha(value: str, name: str) -> str:
     return value
 
 
-def _git_head(directory: Path, name: str) -> str:
+def _git(directory: Path, name: str, *args, encoding="utf-8"):
     try:
-        result = subprocess.run(
-            ["git", "-C", str(directory), "rev-parse", "HEAD"],
-            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            encoding="ascii")
+        return subprocess.run(
+            ["git", "-C", str(directory), *args], check=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding=encoding)
     except (OSError, subprocess.CalledProcessError, UnicodeError) as exc:
-        raise ExportError("Cannot verify {} checkout HEAD: {}".format(name, exc)) from exc
-    return result.stdout.strip()
+        raise ExportError("Cannot verify {} checkout: {}".format(name, exc)) from exc
+
+
+def _git_head(directory: Path, name: str) -> str:
+    return _git(directory, name, "rev-parse", "HEAD", encoding="ascii").stdout.strip()
 
 
 def verify_checkout(directory: Path, expected_sha: str, name: str) -> None:
+    """Require an exact checkout root with no tracked modifications."""
+    directory = directory.resolve()
+    root = Path(_git(directory, name, "rev-parse", "--show-toplevel").stdout.strip()).resolve()
+    if root != directory:
+        raise ExportError("{} directory must be the checkout root".format(name))
     actual = _git_head(directory, name)
     if actual != expected_sha:
         raise ExportError("{} checkout HEAD {} does not match {}".format(name, actual, expected_sha))
+    result = subprocess.run(
+        ["git", "-C", str(directory), "diff-index", "--quiet", expected_sha, "--"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode not in (0, 1):
+        raise ExportError("Cannot verify {} tracked files".format(name))
+    if result.returncode:
+        raise ExportError("{} checkout has dirty tracked files".format(name))
+
+
+def _data_article_paths(data_dir: Path, data_sha: str) -> set:
+    committed = _git(data_dir, "data", "ls-tree", "-r", "--name-only", data_sha,
+                     "--", "articles").stdout.splitlines()
+    expected = {name for name in committed if name.startswith("articles/")}
+    articles = data_dir / "articles"
+    if articles.is_symlink() or (articles.exists() and not articles.is_dir()):
+        raise ExportError("data articles must be a real directory")
+    actual = ({str(path.relative_to(data_dir)) for path in articles.iterdir()}
+              if articles.exists() else set())
+    if actual != expected:
+        raise ExportError("data checkout has uncommitted, ignored, or missing corpus files")
+    return expected
+
+
+def _snapshot_data(data_dir: Path, data_sha: str, destination: Path) -> None:
+    """Materialize only committed corpus bytes, never mutable worktree bytes."""
+    archive = _git(data_dir, "data", "archive", "--format=tar", data_sha, "articles",
+                   encoding=None).stdout
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as bundle:
+        for member in bundle.getmembers():
+            path = Path(member.name)
+            if path.is_absolute() or ".." in path.parts or not (path.parts and path.parts[0] == "articles"):
+                raise ExportError("Invalid path in pinned DATA archive")
+        bundle.extractall(str(destination))
 
 
 def _project(record: Mapping) -> dict:
@@ -141,9 +185,10 @@ def decode_paragraph_index(content: bytes):
 
 def _validate_shard_count(shard_count: int) -> None:
     if (isinstance(shard_count, bool) or not isinstance(shard_count, int)
-            or shard_count <= 0 or shard_count > UINT32_MAX
+            or shard_count <= 0 or shard_count > MAX_SHARDS
             or shard_count & (shard_count - 1)):
-        raise ExportError("shard count must be a positive power of two fitting uint32")
+        raise ExportError("shard count must be a positive power of two no greater than {}".format(
+            MAX_SHARDS))
     if shard_count + FIXED_OUTPUT_FILES > MAX_ASSET_FILES:
         raise ExportError("shard count {} would produce {} files; static asset limit is {}".format(
             shard_count, shard_count + FIXED_OUTPUT_FILES, MAX_ASSET_FILES))
@@ -202,8 +247,8 @@ def _build_stage(stage: Path, records: Mapping[str, dict], source_sha: str,
     }
     manifest_name = str(version_root / "manifest.json")
     manifest_content = _compact_json(manifest)
-    if len(manifest_content) > MAX_ASSET_BYTES:
-        raise ExportError("Manifest exceeds static asset size limit")
+    if len(manifest_content) > MAX_MANIFEST_BYTES:
+        raise ExportError("Manifest exceeds {}-byte format limit".format(MAX_MANIFEST_BYTES))
     (stage / manifest_name).write_bytes(manifest_content)
     metadata = {
         "formatVersion": FORMAT_VERSION, "sourceSha": source_sha, "dataSha": data_sha,
@@ -265,13 +310,19 @@ def _validate_stage(stage: Path, manifest: dict, records: Mapping[str, dict]) ->
         raise ExportError("Generated shards do not contain every canonical record exactly once")
 
 
-def _publish_directory(stage: Path, output_dir: Path) -> None:
+def _validate_output_target(output_dir: Path) -> None:
     if output_dir.is_symlink():
         raise ExportError("output directory may not be a symlink")
-    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    if output_dir.exists() and not output_dir.is_dir():
+        raise ExportError("existing output must be a real directory")
     backup = output_dir.parent / ("." + output_dir.name + ".old")
     if backup.exists() or backup.is_symlink():
         raise ExportError("stale export backup exists: {}".format(backup))
+
+
+def _publish_directory(stage: Path, output_dir: Path) -> None:
+    _validate_output_target(output_dir)
+    backup = output_dir.parent / ("." + output_dir.name + ".old")
     moved_old = False
     try:
         if output_dir.exists():
@@ -294,29 +345,43 @@ def export_worker(data_dir: Path, output_dir: Path, source_sha: str, data_sha: s
     source_sha = _require_sha(source_sha, "source SHA")
     data_sha = _require_sha(data_sha, "data SHA")
     _validate_shard_count(shard_count)
-    if output_dir == data_dir or data_dir in output_dir.parents:
-        raise ExportError("output directory must be outside the canonical data checkout")
+    if output_dir == data_dir or data_dir in output_dir.parents or output_dir in data_dir.parents:
+        raise ExportError("output directory must not overlap the canonical data checkout")
+    _validate_output_target(output_dir)
+    records_dir = data_dir
+    snapshot = None
     if verify_refs:
+        source_root = Path(__file__).resolve().parents[1]
         verify_checkout(data_dir, data_sha, "data")
-        verify_checkout(Path(__file__).resolve().parents[1], source_sha, "source")
+        _data_article_paths(data_dir, data_sha)
+        verify_checkout(source_root, source_sha, "source")
+        snapshot = tempfile.TemporaryDirectory(prefix="worker-data-snapshot-")
+        records_dir = Path(snapshot.name)
+        _snapshot_data(data_dir, data_sha, records_dir)
     try:
-        records = load_articles(data_dir)
-    except CorpusError as exc:
-        raise ExportError(str(exc)) from exc
-    stage = Path(tempfile.mkdtemp(prefix="." + output_dir.name + ".stage-",
-                                  dir=str(output_dir.parent))) if output_dir.parent.exists() else None
-    if stage is None:
-        output_dir.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            records = load_articles(records_dir)
+        except CorpusError as exc:
+            raise ExportError(str(exc)) from exc
+        if not output_dir.parent.exists():
+            output_dir.parent.mkdir(parents=True)
         stage = Path(tempfile.mkdtemp(prefix="." + output_dir.name + ".stage-",
                                       dir=str(output_dir.parent)))
-    try:
-        manifest = _build_stage(stage, records, source_sha, data_sha, shard_count)
-        _validate_stage(stage, manifest, records)
-        _publish_directory(stage, output_dir)
-        return manifest
+        try:
+            manifest = _build_stage(stage, records, source_sha, data_sha, shard_count)
+            _validate_stage(stage, manifest, records)
+            if verify_refs:
+                verify_checkout(data_dir, data_sha, "data")
+                _data_article_paths(data_dir, data_sha)
+                verify_checkout(source_root, source_sha, "source")
+            _publish_directory(stage, output_dir)
+            return manifest
+        finally:
+            if stage.exists():
+                shutil.rmtree(stage)
     finally:
-        if stage.exists():
-            shutil.rmtree(stage)
+        if snapshot is not None:
+            snapshot.cleanup()
 
 
 def main(argv=None) -> int:

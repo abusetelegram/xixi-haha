@@ -6,8 +6,13 @@ loader and projects only `id`, `title`, `date`, `author`, `editor`, and `text`,
 plus paired `content_type`/`media` when present. Values are passed through; raw
 `article` HTML is never emitted.
 
-Run it from the exact source checkout. Both checkouts' `HEAD`s must equal the
-explicit full SHAs:
+Run it from the exact source checkout. Both paths must be repository roots at the
+explicit full SHAs, with no tracked changes. Every file consumed from
+`DATA/articles` must be present in that pinned commit; extra untracked or ignored
+corpus files are rejected. The CLI exports from a private `git archive` snapshot
+and rechecks both worktrees before publication, so mutable worktree bytes are
+never labeled as committed data. Library callers may explicitly disable these
+Git checks only for synthetic fixtures (`verify_refs=False`):
 
 ```sh
 python parse/export_worker.py \
@@ -15,11 +20,14 @@ python parse/export_worker.py \
   --source-sha "$SOURCE_SHA" --data-sha "$DATA_SHA"
 ```
 
-The default is 256 shards. `--shards` accepts a positive power of two, allowing
-512 or 1024 after measurement without a runtime constant change. Output is
-built and fully re-read in a sibling staging directory before replacement. The
-canonical checkout is read-only and output inside it is rejected. The build
-fails if any asset exceeds 25 MiB or if the export exceeds 20,000 files; these
+The default is 256 shards. `--shards` accepts a positive power of two up to
+4096. The shard cap and fixed-file count are checked before shard-list
+allocation. Output is built and fully re-read in a sibling staging directory
+before replacement. The canonical checkout is read-only, and output paths that
+equal, contain, or are contained by it are rejected before staging. Existing
+regular files and live or dangling symlinks are also rejected without replacement
+or backup. Each shard may be at most 25 MiB, while the encoded manifest has a
+stricter 1 MiB format limit; the export may contain at most 20,000 files. These
 Cloudflare limits remain external service constraints and must be rechecked
 before deployment.
 

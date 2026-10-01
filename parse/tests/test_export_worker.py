@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -50,8 +51,22 @@ class WorkerExportTests(unittest.TestCase):
         corpus.create_articles(self.data, records, strict_content=False)
 
     def export(self, shards=4):
+        # Synthetic library fixtures intentionally opt out of CLI Git provenance.
         return export_worker.export_worker(
             self.data, self.output, SOURCE_SHA, DATA_SHA, shards, verify_refs=False)
+
+    def init_data_git(self, records, gitignore=None):
+        self.create(records)
+        subprocess.run(["git", "init", "-q", str(self.data)], check=True)
+        subprocess.run(["git", "-C", str(self.data), "config", "user.name", "Test"], check=True)
+        subprocess.run(["git", "-C", str(self.data), "config", "user.email", "test@example.com"], check=True)
+        if gitignore is not None:
+            (self.data / ".gitignore").write_text(gitignore, encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.data), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.data), "commit", "-qm", "fixture"], check=True)
+        return subprocess.run(
+            ["git", "-C", str(self.data), "rev-parse", "HEAD"], check=True,
+            stdout=subprocess.PIPE, encoding="ascii").stdout.strip()
 
     def snapshot_source(self):
         return {str(path.relative_to(self.data)): hashlib.sha256(path.read_bytes()).hexdigest()
@@ -144,11 +159,11 @@ class WorkerExportTests(unittest.TestCase):
 
     def test_invalid_shard_counts_and_shas_fail(self):
         self.create([ordinary(1)])
-        for count in (0, 3, -2, True, 1 << 15, 1 << 31):
+        for count in (0, 3, -2, True, 1 << 13, 1 << 31):
             with self.subTest(count=count), self.assertRaises(export_worker.ExportError):
                 self.export(count)
         self.assertFalse(self.output.exists())
-        export_worker._validate_shard_count(1 << 14)
+        export_worker._validate_shard_count(1 << 12)
         with self.assertRaises(export_worker.ExportError):
             export_worker.export_worker(self.data, self.output, "ABC", DATA_SHA,
                                          verify_refs=False)
@@ -169,6 +184,13 @@ class WorkerExportTests(unittest.TestCase):
         self.assertFalse(self.output.exists())
         with patch.object(export_worker, "MAX_ASSET_FILES", 6):
             with self.assertRaisesRegex(export_worker.ExportError, "files"):
+                self.export()
+        self.assertFalse(self.output.exists())
+
+    def test_manifest_has_independent_one_mib_encoded_limit(self):
+        self.create([ordinary(1)])
+        with patch.object(export_worker, "MAX_MANIFEST_BYTES", 1):
+            with self.assertRaisesRegex(export_worker.ExportError, "Manifest exceeds"):
                 self.export()
         self.assertFalse(self.output.exists())
 
@@ -210,14 +232,105 @@ class WorkerExportTests(unittest.TestCase):
 
     def test_output_inside_data_is_rejected(self):
         self.create([ordinary(1)])
-        with self.assertRaisesRegex(export_worker.ExportError, "outside"):
+        with self.assertRaisesRegex(export_worker.ExportError, "overlap"):
             export_worker.export_worker(
                 self.data, self.data / "generated", SOURCE_SHA, DATA_SHA,
                 verify_refs=False)
 
+    def test_output_ancestor_of_data_is_rejected_without_source_mutation(self):
+        self.output = self.root / "ancestor"
+        self.data = self.output / "data"
+        self.create([ordinary(1)])
+        before = self.snapshot_source()
+        with self.assertRaisesRegex(export_worker.ExportError, "overlap"):
+            self.export()
+        self.assertEqual(before, self.snapshot_source())
+        self.assertTrue(self.data.exists())
+        self.assertFalse((self.root / ".ancestor.old").exists())
+
+    def test_regular_file_and_dangling_symlink_outputs_fail_before_staging(self):
+        self.create([ordinary(1)])
+        self.output.write_text("keep", encoding="utf-8")
+        with self.assertRaisesRegex(export_worker.ExportError, "real directory"):
+            self.export()
+        self.assertEqual(self.output.read_text(encoding="utf-8"), "keep")
+        self.assertFalse(any(self.root.glob(".output.stage-*")))
+        self.output.unlink()
+        os.symlink(self.root / "missing", self.output)
+        with self.assertRaisesRegex(export_worker.ExportError, "symlink"):
+            self.export()
+        self.assertTrue(self.output.is_symlink())
+        self.assertFalse(any(self.root.glob(".output.stage-*")))
+        self.assertFalse((self.root / ".output.old").exists())
+
+    def test_verified_real_checkout_exports_pinned_commit(self):
+        data_sha = self.init_data_git([ordinary(1)])
+        source_sha = subprocess.run(
+            ["git", "-C", str(Path(export_worker.__file__).resolve().parents[1]),
+             "rev-parse", "HEAD"], check=True, stdout=subprocess.PIPE,
+            encoding="ascii").stdout.strip()
+        manifest = export_worker.export_worker(
+            self.data, self.output, source_sha, data_sha, shard_count=4)
+        self.assertEqual(manifest["dataSha"], data_sha)
+
+    def test_dirty_tracked_valid_record_is_rejected(self):
+        data_sha = self.init_data_git([ordinary(1)])
+        (self.data / "articles" / "1.json").write_bytes(
+            corpus.serialize_record(ordinary(1, title="dirty"), strict_content=False))
+        with self.assertRaisesRegex(export_worker.ExportError, "dirty tracked"):
+            export_worker.export_worker(self.data, self.output, SOURCE_SHA, data_sha)
+        self.assertFalse(self.output.exists())
+
+    def test_ignored_extra_consumed_corpus_file_is_rejected(self):
+        data_sha = self.init_data_git([ordinary(1)], "articles/2.json\n")
+        (self.data / "articles" / "2.json").write_bytes(
+            corpus.serialize_record(ordinary(2), strict_content=False))
+        with self.assertRaisesRegex(export_worker.ExportError, "uncommitted, ignored"):
+            export_worker.export_worker(self.data, self.output, SOURCE_SHA, data_sha)
+        self.assertFalse(self.output.exists())
+
+    def test_wrong_checkout_root_and_dirty_source_are_rejected(self):
+        data_sha = self.init_data_git([ordinary(1)])
+        with self.assertRaisesRegex(export_worker.ExportError, "checkout root"):
+            export_worker.verify_checkout(self.data / "articles", data_sha, "data")
+        source = self.root / "source"
+        source.mkdir()
+        subprocess.run(["git", "init", "-q", str(source)], check=True)
+        subprocess.run(["git", "-C", str(source), "config", "user.name", "Test"], check=True)
+        subprocess.run(["git", "-C", str(source), "config", "user.email", "test@example.com"], check=True)
+        tracked = source / "export_worker.py"
+        tracked.write_text("original\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(source), "commit", "-qm", "source"], check=True)
+        sha = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], check=True,
+                             stdout=subprocess.PIPE, encoding="ascii").stdout.strip()
+        tracked.write_text("dirty\n", encoding="utf-8")
+        with self.assertRaisesRegex(export_worker.ExportError, "dirty tracked"):
+            export_worker.verify_checkout(source, sha, "source")
+
+    def test_data_mutation_during_pinned_snapshot_export_is_rejected(self):
+        data_sha = self.init_data_git([ordinary(1)])
+        source_sha = subprocess.run(
+            ["git", "-C", str(Path(export_worker.__file__).resolve().parents[1]),
+             "rev-parse", "HEAD"], check=True, stdout=subprocess.PIPE,
+            encoding="ascii").stdout.strip()
+        real_snapshot = export_worker._snapshot_data
+
+        def snapshot_then_mutate(data_dir, sha, destination):
+            real_snapshot(data_dir, sha, destination)
+            (self.data / "articles" / "1.json").write_bytes(
+                corpus.serialize_record(ordinary(1, title="raced"), strict_content=False))
+
+        with patch.object(export_worker, "_snapshot_data", side_effect=snapshot_then_mutate):
+            with self.assertRaisesRegex(export_worker.ExportError, "dirty tracked"):
+                export_worker.export_worker(self.data, self.output, source_sha, data_sha,
+                                            shard_count=4)
+        self.assertFalse(self.output.exists())
+        self.assertFalse(any(self.root.glob(".output.stage-*")))
+
     def test_checkout_verification_fails_closed(self):
         self.create([ordinary(1)])
-        with self.assertRaisesRegex(export_worker.ExportError, "checkout HEAD"):
+        with self.assertRaisesRegex(export_worker.ExportError, "Cannot verify data checkout"):
             export_worker.export_worker(self.data, self.output, SOURCE_SHA, DATA_SHA)
 
 
