@@ -1,0 +1,20 @@
+{
+  "rule": "selectable iff at least one Unicode code point is not ECMAScript WhiteSpace or LineTerminator",
+  "cases": [
+    {"label": "empty", "text": "", "selectable": false},
+    {"label": "ascii-space", "text": " \t\r\n", "selectable": false},
+    {"label": "nbsp", "text": " ", "selectable": false},
+    {"label": "unicode-whitespace", "text": "   　﻿", "selectable": false},
+    {"label": "zero-width-space-boundary", "text": "​", "selectable": true},
+    {"label": "mongolian-vowel-separator-boundary", "text": "᠎", "selectable": true},
+    {"label": "padded-payload", "text": "  原样引用  ", "selectable": true}
+  ],
+  "rankMappingExample": {
+    "text": ["", " ", "  第一条  ", "　", "​", "最后 "],
+    "selectedRanks": [
+      {"rank": 0, "originalTextIndex": 2, "exactPayload": "  第一条  "},
+      {"rank": 1, "originalTextIndex": 4, "exactPayload": "​"},
+      {"rank": 2, "originalTextIndex": 5, "exactPayload": "最后 "}
+    ]
+  }
+}
