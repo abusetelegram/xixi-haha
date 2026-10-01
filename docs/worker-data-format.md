@@ -23,11 +23,12 @@ fails if any asset exceeds 25 MiB or if the export exceeds 20,000 files; these
 Cloudflare limits remain external service constraints and must be rechecked
 before deployment.
 
-At DATA `1b3fc6018ad2f6c13d61a8ca869b9bbf26fc152a` and source
-`2b80c2820b8539b21844f35622666446fe14e38c`, a verified real export produced
-15,111 articles (15,081 nonempty), 207,679 paragraphs, 259 files, and 66,606,320
-bytes total. The binary index is 120,904 bytes; 256 shards range from 106,478 to
-458,626 bytes with at most 81 records. The next Worker stage must benchmark a
+At DATA `1b3fc6018ad2f6c13d61a8ca869b9bbf26fc152a`, a verified real export
+produced 15,111 articles (15,081 selectable), 207,679 source paragraphs and
+207,679 selectable paragraphs, 259 files, and 66,606,378 bytes total. The exact
+snapshot has zero blank/whitespace-only paragraph strings. The binary index is
+120,904 bytes; 256 shards range from 106,478 to 458,626 bytes with at most 81
+records. The next Worker stage must benchmark a
 cold parse of the 458,626-byte worst shard and treat the current Free-plan 10 ms
 CPU allowance as a screening target; this exporter measurement is not a claim
 about Cloudflare runtime performance.
@@ -49,8 +50,27 @@ Shard arrays are compact UTF-8 JSON with records in numeric-ID order. Assignment
 is deterministic: `uint32(articleId) & (shardCount - 1)`.
 
 All IDs, counts, and cumulative offsets are checked to fit unsigned 32-bit
-integers. Every canonical record occurs in exactly one shard; empty-text records
-remain available for article lookup.
+integers. Every canonical record occurs in exactly one shard; its original
+`text` array and string payloads are unchanged, including blank entries and
+padding. Manifest counts distinguish `sourceParagraphs` (all lookup array
+entries) from `selectableParagraphs` and `selectableArticles`.
+
+## Quote selectability and original indexes
+
+A paragraph is selectable iff at least one Unicode code point is **not** in the
+ECMAScript WhiteSpace + LineTerminator set used by JavaScript `trim`:
+`U+0009..U+000D`, `U+0020`, `U+00A0`, `U+1680`, `U+2000..U+200A`,
+`U+2028`, `U+2029`, `U+202F`, `U+205F`, `U+3000`, or `U+FEFF`. No text is
+trimmed or normalized. Notably `U+200B` ZERO WIDTH SPACE and `U+180E` MONGOLIAN
+VOWEL SEPARATOR are non-whitespace boundaries and are selectable.
+
+The index stores selectable **ranks**, not raw `text` indexes. After index
+selection identifies an article and local selectable rank, the runtime scans
+only that selected article's original `text` array, applies the same code-point
+rule, and returns the original array index and exact string at that rank. It
+must not filter or renumber the lookup projection. The language-neutral
+`worker-selectable-v1.json` fixture defines whitespace boundaries, preserved
+payloads, and rank-to-original-index examples for the TypeScript implementation.
 
 ## Paragraph index binary contract
 
@@ -61,18 +81,20 @@ All integers use **big-endian (network) byte order**. The file is:
 | 0 | 4 bytes | ASCII magic `XHPI` |
 | 4 | uint32 | format version (`1`) |
 | 8 | uint32 | article record count |
-| 12 | uint32 | total nonempty paragraphs |
-| 16 | repeated `(uint32,uint32)` | numeric article ID, cumulative paragraph offset |
+| 12 | uint32 | total selectable paragraph ranks |
+| 16 | repeated `(uint32,uint32)` | numeric article ID, cumulative selectable-paragraph offset |
 
 There is one entry per article in globally sorted numeric-ID order. Offsets are
-monotonic and the last equals the paragraph total. Empty articles therefore
-have a zero-width range (the same offset as their predecessor) and cannot be
-selected as quotes, while remaining indexed for consistency checks and lookup.
-`parse/tests/fixtures/worker-index-v1.bin` and its adjacent JSON description are
-a tiny language-neutral golden contract for the TypeScript decoder.
-To map an unbiased random integer `k` in `[0, paragraphCount)`, binary-search for
-the first cumulative offset strictly greater than `k`; the paragraph index is
-`k - previousOffset`. The runtime must generate `k` without modulo bias.
+monotonic and the last equals the selectable-paragraph total. Articles without
+selectable paragraphs therefore have a zero-width range (the same offset as
+their predecessor) and cannot be selected as quotes, while remaining available
+for lookup. `parse/tests/fixtures/worker-index-v1.bin` and its adjacent JSON
+description are a tiny language-neutral golden contract for the TypeScript
+decoder. To map an unbiased random integer `k` in
+`[0, selectableParagraphCount)`, binary-search for the first cumulative offset
+strictly greater than `k`; the local selectable rank is
+`k - previousOffset`. The runtime must generate `k`
+without modulo bias, then map that rank as specified above.
 
 Consumers must read paths and `shardCount` from the checksummed manifest, reject
 unknown format versions or checksum/count mismatches, and never fall back to a

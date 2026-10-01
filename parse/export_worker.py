@@ -26,11 +26,18 @@ UINT32_MAX = (1 << 32) - 1
 MAX_ASSET_BYTES = 25 * 1024 * 1024
 MAX_ASSET_FILES = 20_000
 INDEX_MAGIC = b"XHPI"
-INDEX_HEADER = struct.Struct(">4sIII")  # magic, format, record count, paragraph count
-INDEX_ENTRY = struct.Struct(">II")     # article id, cumulative paragraph offset
+INDEX_HEADER = struct.Struct(">4sIII")  # magic, format, record count, selectable count
+INDEX_ENTRY = struct.Struct(">II")     # article id, cumulative selectable offset
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 PROJECTED_FIELDS = ("id", "title", "date", "author", "editor", "text")
 OPTIONAL_FIELDS = ("content_type", "media")
+# ECMAScript WhiteSpace + LineTerminator code points. Keeping this explicit
+# makes Python export ranks match the TypeScript runtime without normalization.
+SELECTION_WHITESPACE = frozenset(
+    "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000\ufeff")
+FIXED_OUTPUT_FILES = 3  # metadata, manifest, paragraph index
 
 
 class ExportError(ValueError):
@@ -80,6 +87,13 @@ def _project(record: Mapping) -> dict:
     return projected
 
 
+def is_selectable_paragraph(value: str) -> bool:
+    """Return whether an exact paragraph payload contains a non-whitespace code point."""
+    if not isinstance(value, str):
+        raise ExportError("Paragraph must be a string")
+    return any(character not in SELECTION_WHITESPACE for character in value)
+
+
 def encode_paragraph_index(records) -> bytes:
     """Encode sorted IDs and cumulative offsets as network-byte-order uint32s."""
     if len(records) > UINT32_MAX:
@@ -90,7 +104,7 @@ def encode_paragraph_index(records) -> bytes:
     for record in records:
         try:
             aid = int(record["id"])
-            paragraphs = len(record["text"])
+            paragraphs = sum(is_selectable_paragraph(value) for value in record["text"])
         except (KeyError, TypeError, ValueError) as exc:
             raise ExportError("Invalid projected article/index fields") from exc
         if aid <= previous or aid > UINT32_MAX:
@@ -122,7 +136,7 @@ def decode_paragraph_index(content: bytes):
         previous_id, previous_offset = aid, offset
     if (entries[-1][1] if entries else 0) != total:
         raise ExportError("Paragraph index final offset does not match total")
-    return {"articleCount": count, "paragraphCount": total, "entries": entries}
+    return {"articleCount": count, "selectableParagraphCount": total, "entries": entries}
 
 
 def _validate_shard_count(shard_count: int) -> None:
@@ -130,6 +144,9 @@ def _validate_shard_count(shard_count: int) -> None:
             or shard_count <= 0 or shard_count > UINT32_MAX
             or shard_count & (shard_count - 1)):
         raise ExportError("shard count must be a positive power of two fitting uint32")
+    if shard_count + FIXED_OUTPUT_FILES > MAX_ASSET_FILES:
+        raise ExportError("shard count {} would produce {} files; static asset limit is {}".format(
+            shard_count, shard_count + FIXED_OUTPUT_FILES, MAX_ASSET_FILES))
 
 
 def _write_file(root: Path, relative: str, content: bytes, files: dict) -> None:
@@ -169,14 +186,17 @@ def _build_stage(stage: Path, records: Mapping[str, dict], source_sha: str,
         "sourceSha": source_sha,
         "dataSha": data_sha,
         "counts": {"articles": len(projected),
-                   "nonemptyArticles": sum(bool(row["text"]) for row in projected),
-                   "paragraphs": decoded["paragraphCount"]},
+                   "selectableArticles": sum(
+                       any(is_selectable_paragraph(value) for value in row["text"])
+                       for row in projected),
+                   "sourceParagraphs": sum(len(row["text"]) for row in projected),
+                   "selectableParagraphs": decoded["selectableParagraphCount"]},
         "sharding": {"algorithm": "uint32-id-bitmask", "shardCount": shard_count,
                      "mask": shard_count - 1, "recordsSortedBy": "numeric-id",
                      "shards": shard_map},
         "paragraphIndex": {
             "path": index_name, "byteOrder": "big-endian",
-            "layout": "4-byte XHPI magic; uint32 formatVersion, recordCount, paragraphCount; repeated uint32 articleId,cumulativeParagraphOffset",
+            "layout": "4-byte XHPI magic; uint32 formatVersion, recordCount, selectableParagraphCount; repeated uint32 articleId,cumulativeSelectableParagraphOffset",
             **files[index_name],
         },
     }
@@ -212,7 +232,7 @@ def _validate_stage(stage: Path, manifest: dict, records: Mapping[str, dict]) ->
     expected_offsets = []
     total = 0
     for aid in sorted(records, key=int):
-        total += len(records[aid]["text"])
+        total += sum(is_selectable_paragraph(value) for value in records[aid]["text"])
         expected_offsets.append(total)
     if [entry[1] for entry in decoded["entries"]] != expected_offsets:
         raise ExportError("Paragraph index offsets do not match canonical records")

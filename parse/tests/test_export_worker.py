@@ -58,7 +58,10 @@ class WorkerExportTests(unittest.TestCase):
                 for path in self.data.rglob("*") if path.is_file()}
 
     def test_deterministic_projection_binary_contract_and_no_source_write(self):
-        self.create([ordinary(1, ["一", "二"]), ordinary(2, []), ordinary(5, ["三"])])
+        selection = json.loads(
+            (FIXTURES / "worker-selectable-v1.json").read_text(encoding="utf-8"))
+        boundary_text = [case["text"] for case in selection["cases"]]
+        self.create([ordinary(1, boundary_text), ordinary(2, []), ordinary(5, ["三"])])
         before = self.snapshot_source()
         first = self.export()
         first_bytes = {str(path.relative_to(self.output)): path.read_bytes()
@@ -73,12 +76,13 @@ class WorkerExportTests(unittest.TestCase):
 
         raw = first_bytes["_data/{}/paragraph-index.bin".format(DATA_SHA)]
         self.assertEqual(raw, (FIXTURES / "worker-index-v1.bin").read_bytes())
-        self.assertEqual(raw[:16], struct.pack(">4sIII", b"XHPI", 1, 3, 3))
-        self.assertEqual(raw[16:], struct.pack(">IIIIII", 1, 2, 2, 2, 5, 3))
+        self.assertEqual(raw[:16], struct.pack(">4sIII", b"XHPI", 1, 3, 4))
+        self.assertEqual(raw[16:], struct.pack(">IIIIII", 1, 3, 2, 3, 5, 4))
         decoded = export_worker.decode_paragraph_index(raw)
-        self.assertEqual(decoded["entries"], [(1, 2), (2, 2), (5, 3)])
+        self.assertEqual(decoded["entries"], [(1, 3), (2, 3), (5, 4)])
         self.assertEqual(first["counts"], {
-            "articles": 3, "nonemptyArticles": 2, "paragraphs": 3})
+            "articles": 3, "selectableArticles": 2,
+            "sourceParagraphs": 8, "selectableParagraphs": 4})
 
     def test_projection_preserves_values_and_image_media(self):
         record = ordinary(7, ["  空格保持  ", ""] , title=" A & B ", author="")
@@ -90,6 +94,9 @@ class WorkerExportTests(unittest.TestCase):
             rows.extend(json.loads((self.output / shard["path"]).read_text(encoding="utf-8")))
         by_id = {row["id"]: row for row in rows}
         self.assertEqual(by_id["7"]["text"], ["  空格保持  ", ""])
+        self.assertEqual(manifest["counts"], {
+            "articles": 2, "selectableArticles": 1,
+            "sourceParagraphs": 2, "selectableParagraphs": 1})
         self.assertEqual(by_id["7"]["title"], " A & B ")
         self.assertEqual(by_id["7"]["author"], "")
         self.assertNotIn("article", by_id["7"])
@@ -104,7 +111,8 @@ class WorkerExportTests(unittest.TestCase):
         raw = (self.output / manifest["paragraphIndex"]["path"]).read_bytes()
         decoded = export_worker.decode_paragraph_index(raw)
         self.assertEqual(manifest["counts"], {
-            "articles": 31, "nonemptyArticles": 1, "paragraphs": 1})
+            "articles": 31, "selectableArticles": 1,
+            "sourceParagraphs": 1, "selectableParagraphs": 1})
         self.assertEqual([offset for _, offset in decoded["entries"][:30]], [0] * 30)
         self.assertEqual(decoded["entries"][-1], (31, 1))
         self.assertEqual(sum(shard["recordCount"] for shard in
@@ -120,11 +128,27 @@ class WorkerExportTests(unittest.TestCase):
         self.assertEqual(mapping[2], 1)
         self.assertEqual(len(mapping), 8)
 
+    def test_selectability_golden_and_rank_mapping_preserve_original_indexes(self):
+        fixture = json.loads(
+            (FIXTURES / "worker-selectable-v1.json").read_text(encoding="utf-8"))
+        for case in fixture["cases"]:
+            with self.subTest(case=case["label"]):
+                self.assertEqual(export_worker.is_selectable_paragraph(case["text"]),
+                                 case["selectable"])
+        example = fixture["rankMappingExample"]
+        selected = [(index, value) for index, value in enumerate(example["text"])
+                    if export_worker.is_selectable_paragraph(value)]
+        expected = [(item["originalTextIndex"], item["exactPayload"])
+                    for item in example["selectedRanks"]]
+        self.assertEqual(selected, expected)
+
     def test_invalid_shard_counts_and_shas_fail(self):
         self.create([ordinary(1)])
-        for count in (0, 3, -2, True):
+        for count in (0, 3, -2, True, 1 << 15, 1 << 31):
             with self.subTest(count=count), self.assertRaises(export_worker.ExportError):
                 self.export(count)
+        self.assertFalse(self.output.exists())
+        export_worker._validate_shard_count(1 << 14)
         with self.assertRaises(export_worker.ExportError):
             export_worker.export_worker(self.data, self.output, "ABC", DATA_SHA,
                                          verify_refs=False)
@@ -143,7 +167,7 @@ class WorkerExportTests(unittest.TestCase):
             with self.assertRaisesRegex(export_worker.ExportError, "exceeds"):
                 self.export()
         self.assertFalse(self.output.exists())
-        with patch.object(export_worker, "MAX_ASSET_FILES", 2):
+        with patch.object(export_worker, "MAX_ASSET_FILES", 6):
             with self.assertRaisesRegex(export_worker.ExportError, "files"):
                 self.export()
         self.assertFalse(self.output.exists())

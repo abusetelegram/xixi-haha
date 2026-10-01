@@ -2,19 +2,19 @@
   "formatVersion": 1,
   "byteOrder": "big-endian",
   "articleCount": 3,
-  "paragraphCount": 3,
+  "selectableParagraphCount": 4,
   "entries": [
     {
       "articleId": 1,
-      "cumulativeParagraphOffset": 2
+      "cumulativeSelectableParagraphOffset": 3
     },
     {
       "articleId": 2,
-      "cumulativeParagraphOffset": 2
+      "cumulativeSelectableParagraphOffset": 3
     },
     {
       "articleId": 5,
-      "cumulativeParagraphOffset": 3
+      "cumulativeSelectableParagraphOffset": 4
     }
   ]
 }
