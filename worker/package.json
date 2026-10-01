@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22 <23"
+    "node": ">=22.20.0 <23"
   },
   "scripts": {
     "fixtures": "python3 scripts/generate-test-assets.py",

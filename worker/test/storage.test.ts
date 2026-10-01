@@ -12,6 +12,7 @@ import {
 } from "../src/main";
 
 const ASSETS = resolve(import.meta.dirname, "generated-assets");
+const MAX_MANIFEST_BYTES = 1024 * 1024;
 const encoder = new TextEncoder();
 
 function walk(directory: string): string[] {
@@ -38,6 +39,18 @@ function resignManifest(files: Map<string, Uint8Array>, mutate: (manifest: any) 
   const manifest = JSON.parse(new TextDecoder().decode(files.get(metadata.manifestPath)!));
   mutate(manifest);
   const bytes = jsonBytes(manifest);
+  files.set(metadata.manifestPath, bytes);
+  metadata.manifestSha256 = sha(bytes);
+  files.set("worker-data.json", jsonBytes(metadata));
+}
+
+function padManifestTo(files: Map<string, Uint8Array>, size: number): void {
+  const metadata = JSON.parse(new TextDecoder().decode(files.get("worker-data.json")!));
+  const manifest = files.get(metadata.manifestPath)!;
+  if (manifest.byteLength > size) throw new Error("fixture manifest already exceeds requested size");
+  const bytes = new Uint8Array(size);
+  bytes.set(manifest);
+  bytes.fill(0x20, manifest.byteLength);
   files.set(metadata.manifestPath, bytes);
   metadata.manifestSha256 = sha(bytes);
   files.set("worker-data.json", jsonBytes(metadata));
@@ -196,6 +209,16 @@ describe("AssetRepository generated fixture", () => {
     await expect(store.paragraphIndex()).rejects.toThrow(AssetValidationError);
     for (const [path, bytes] of fixtureFiles()) files.set(path, bytes);
     await expect(store.paragraphIndex()).resolves.toMatchObject({ articleCount: 4 });
+  });
+
+  it("accepts a valid manifest at the 1 MiB boundary and rejects one byte over", async () => {
+    const bounded = fixtureFiles();
+    padManifestTo(bounded, MAX_MANIFEST_BYTES);
+    await expect(repository(bounded).store.paragraphIndex()).resolves.toMatchObject({ articleCount: 4 });
+
+    const oversized = fixtureFiles();
+    padManifestTo(oversized, MAX_MANIFEST_BYTES + 1);
+    await expect(repository(oversized).store.paragraphIndex()).rejects.toThrow(/byte bound/);
   });
 
   it("fails closed for checksum, manifest path/count, and shard membership errors", async () => {
