@@ -26,11 +26,17 @@ def load_json(path):
 def main(argv):
     if len(argv) != 4:
         fail("usage: validate-deployment.py ASSET_DIR SOURCE_SHA DATA_SHA")
-    root = Path(argv[1]).resolve()
+    lexical_root = Path(argv[1]).absolute()
     source_sha, data_sha = argv[2:]
     if not SHA.fullmatch(source_sha) or not SHA.fullmatch(data_sha):
         fail("provenance must use exact lowercase commit SHAs")
-    if not root.is_dir() or root.is_symlink():
+    if lexical_root.is_symlink():
+        fail("asset root must be a real directory")
+    try:
+        root = lexical_root.resolve(strict=True)
+    except OSError:
+        fail("asset root must be a real directory")
+    if not root.is_dir():
         fail("asset root must be a real directory")
 
     files = sorted(path for path in root.rglob("*") if path.is_file())
