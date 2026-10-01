@@ -1,4 +1,4 @@
-import { AssetLoadCapacityError, AssetValidationError, EmptyCorpusError } from "../errors";
+import { AssetLoadCapacityError, AssetUnavailableError, AssetValidationError, EmptyCorpusError } from "../errors";
 import type { Quote } from "../types";
 import { formatQuoteHtml, stableInlineResultId } from "./format";
 import { callTelegram, TelegramTransportError, type TelegramTransportOptions } from "./transport";
@@ -176,7 +176,8 @@ export function createTelegramHandler(dependencies: TelegramDependencies): (requ
       }
       return new Response(null, { status: 200 });
     } catch (caught) {
-      if (caught instanceof AssetValidationError || caught instanceof AssetLoadCapacityError || caught instanceof EmptyCorpusError) {
+      if (caught instanceof AssetValidationError || caught instanceof AssetUnavailableError
+        || caught instanceof AssetLoadCapacityError || caught instanceof EmptyCorpusError) {
         return jsonError(503, "assets_unavailable");
       }
       if (caught instanceof TelegramTransportError) {

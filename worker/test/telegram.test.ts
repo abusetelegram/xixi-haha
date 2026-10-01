@@ -221,6 +221,36 @@ describe("Telegram webhook", () => {
     expect(telegramFetch).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["fetch rejection", vi.fn(async () => { throw new TypeError("asset provider unavailable"); })],
+    ["body read rejection", vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      pull(controller) { controller.error(new Error("asset stream unavailable")); },
+    })))],
+  ])("maps asset provider %s to 503 without calling Telegram", async (_label, assetFetch) => {
+    const telegramFetch = vi.fn<typeof fetch>();
+    const worker = createWorkerHandler({
+      ASSETS: { fetch: assetFetch } as unknown as Fetcher,
+      BOT_TOKEN: TOKEN,
+      TELEGRAM_WEBHOOK_SECRET: SECRET,
+      BOT_USERNAME: "xixi_haha_bot",
+    }, telegramFetch);
+    const response = await worker(webhook(message("/yiyan")));
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "assets_unavailable" });
+    expect(assetFetch).toHaveBeenCalledTimes(1);
+    expect(telegramFetch).not.toHaveBeenCalled();
+  });
+
+  it("keeps unrelated quote-service programmer errors as 500", async () => {
+    const randomQuote = vi.fn(async () => { throw new Error("programmer error"); });
+    const telegramFetch = vi.fn<typeof fetch>();
+    const handler = createTelegramHandler({ quoteService: { randomQuote }, fetch: telegramFetch });
+    const response = await handler(webhook(message("/yiyan")), CONFIG);
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "internal_error" });
+    expect(telegramFetch).not.toHaveBeenCalled();
+  });
+
   it("wires a configured Worker to mocked Telegram and the shared quote service", async () => {
     const telegramFetch = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ ok: true })));
     const worker = createWorkerHandler({
