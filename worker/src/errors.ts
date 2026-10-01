@@ -2,6 +2,16 @@ export class AssetValidationError extends Error {
   override readonly name = "AssetValidationError";
 }
 
+/** Retryable failure while fetching or reading an internal asset. */
+export class AssetUnavailableError extends Error {
+  override readonly name = "AssetUnavailableError";
+  readonly retryable = true;
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+  }
+}
+
 export class EmptyCorpusError extends Error {
   override readonly name = "EmptyCorpusError";
 }

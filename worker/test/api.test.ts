@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AssetRepository } from "../src/asset-repository";
 import { createApiHandler, type ApiDependencies } from "../src/api/handler";
 import { AssetLoadCapacityError, AssetValidationError } from "../src/errors";
@@ -70,6 +70,7 @@ describe("HTTP API contract", () => {
     const article = await api(request("/api/articles/2"));
     expect(article.status).toBe(200);
     expect(article.headers.get("cache-control")).toBe("public, max-age=0, must-revalidate");
+    expect(article.headers.get("access-control-expose-headers")).toBe("ETag");
     expect(await article.json()).toMatchObject({ id: "2", text: [], content_type: "image", media: [{ type: "image" }] });
     const etag = article.headers.get("etag");
     expect(etag).toBe(`"${"b".repeat(40)}-2"`);
@@ -77,6 +78,7 @@ describe("HTTP API contract", () => {
     const notModified = await api(request("/api/articles/2", { headers: { "If-None-Match": `"other", W/${etag}` } }));
     expect(notModified.status).toBe(304);
     expect(notModified.headers.get("etag")).toBe(etag);
+    expect(notModified.headers.get("access-control-expose-headers")).toBe("ETag");
     expect(await notModified.text()).toBe("");
 
     const health = await api(request("/healthz"));
@@ -101,9 +103,18 @@ describe("HTTP API contract", () => {
     const wrongMethod = await api(request("/api/quote", { method: "POST" }));
     expect(wrongMethod.status).toBe(405);
     expect(wrongMethod.headers.get("allow")).toBe("GET, OPTIONS");
-    const options = await api(request("/api/quote", { method: "OPTIONS" }));
+    const options = await api(request("/api/quote", {
+      method: "OPTIONS",
+      headers: {
+        Origin: "https://client.example",
+        "Access-Control-Request-Method": "GET",
+        "Access-Control-Request-Headers": "If-None-Match",
+      },
+    }));
     expect(options.status).toBe(204);
+    expect(options.headers.get("access-control-allow-origin")).toBe("*");
     expect(options.headers.get("access-control-allow-methods")).toBe("GET, OPTIONS");
+    expect(options.headers.get("access-control-allow-headers")).toBe("If-None-Match");
   });
 
   it("maps corrupt, missing, and capacity-limited internal assets to 503", async () => {
@@ -116,6 +127,38 @@ describe("HTTP API contract", () => {
     const repository = new AssetRepository({ fetch: async () => new Response("missing", { status: 404 }) });
     const result = await createApiHandler({ repository, quoteService: new QuoteService(repository) })(request("/healthz"));
     expect(result.status).toBe(503);
+  });
+
+  it("maps provider fetch and body stream failures to 503 without masking programmer errors", async () => {
+    const fetchFailure = new AssetRepository({ fetch: async () => { throw new TypeError("provider unavailable"); } });
+    const failedFetch = await createApiHandler({
+      repository: fetchFailure,
+      quoteService: new QuoteService(fetchFailure),
+    })(request("/healthz"));
+    expect(failedFetch.status).toBe(503);
+    expect(await failedFetch.json()).toEqual({ error: "assets_unavailable" });
+
+    const bodyFailure = new AssetRepository({
+      fetch: async () => new Response(new ReadableStream<Uint8Array>({
+        pull() { throw new Error("stream interrupted"); },
+      })),
+    });
+    const failedBody = await createApiHandler({
+      repository: bodyFailure,
+      quoteService: new QuoteService(bodyFailure),
+    })(request("/healthz"));
+    expect(failedBody.status).toBe(503);
+    expect(await failedBody.json()).toEqual({ error: "assets_unavailable" });
+
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const programmerFailure = await createApiHandler(throwingDependencies(new Error("bug")))(request("/healthz"));
+      expect(programmerFailure.status).toBe(500);
+      expect(await programmerFailure.json()).toEqual({ error: "internal_error" });
+      expect(consoleError).toHaveBeenCalledOnce();
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 
   it("delegates only generated asset paths and does not SPA-fallback unknown paths", async () => {

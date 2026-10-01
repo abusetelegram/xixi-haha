@@ -1,4 +1,4 @@
-import { AssetLoadCapacityError, AssetValidationError } from "./errors";
+import { AssetLoadCapacityError, AssetUnavailableError, AssetValidationError } from "./errors";
 import { decodeParagraphIndex, type ParagraphIndex } from "./index";
 import { isSelectableParagraph } from "./selection";
 import type { Article, CorpusProvenance, MediaItem } from "./types";
@@ -101,18 +101,29 @@ async function defaultHasher(bytes: Uint8Array): Promise<string> {
   return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
 }
 
-async function boundedBody(response: Response, maximum: number): Promise<Uint8Array> {
+async function boundedBody(response: Response, maximum: number, path: string): Promise<Uint8Array> {
   const declared = response.headers.get("content-length");
   if (declared !== null && (!/^\d+$/.test(declared) || Number(declared) > maximum)) {
     throw new AssetValidationError("asset response exceeds its byte bound");
   }
   if (response.body === null) return new Uint8Array();
-  const reader = response.body.getReader();
+  let reader: ReadableStreamDefaultReader<Uint8Array>;
+  try {
+    reader = response.body.getReader();
+  } catch (cause) {
+    throw new AssetUnavailableError(`asset body could not be opened for ${path}`, { cause });
+  }
   const chunks: Uint8Array[] = [];
   let total = 0;
   try {
     for (;;) {
-      const { done, value } = await reader.read();
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      try {
+        chunk = await reader.read();
+      } catch (cause) {
+        throw new AssetUnavailableError(`asset body read failed for ${path}`, { cause });
+      }
+      const { done, value } = chunk;
       if (done) break;
       total += value.byteLength;
       if (total > maximum) throw new AssetValidationError("asset response exceeds its byte bound");
@@ -391,9 +402,14 @@ export class AssetRepository {
   }
 
   private async read(path: string, maximum: number): Promise<Uint8Array> {
-    const response = await this.fetchAsset(new URL(`/${path}`, this.origin));
+    let response: Response;
+    try {
+      response = await this.fetchAsset(new URL(`/${path}`, this.origin));
+    } catch (cause) {
+      throw new AssetUnavailableError(`asset fetch failed for ${path}`, { cause });
+    }
     if (!response.ok) throw new AssetValidationError(`asset fetch failed for ${path}: ${response.status}`);
-    return boundedBody(response, maximum);
+    return boundedBody(response, maximum, path);
   }
 
   private async checkedRead(descriptor: FileDescriptor): Promise<Uint8Array> {

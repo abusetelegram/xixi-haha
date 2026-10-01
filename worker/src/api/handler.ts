@@ -1,10 +1,12 @@
-import { AssetLoadCapacityError, AssetValidationError, EmptyCorpusError } from "../errors";
+import { AssetLoadCapacityError, AssetUnavailableError, AssetValidationError, EmptyCorpusError } from "../errors";
 import type { CorpusInfo } from "../asset-repository";
 import type { Article, Quote, SelectionMode } from "../types";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, OPTIONS",
+  "Access-Control-Allow-Headers": "If-None-Match",
+  "Access-Control-Expose-Headers": "ETag",
 } as const;
 const JSON_HEADERS = { "Content-Type": "application/json; charset=utf-8" } as const;
 const CANONICAL_ID = /^[1-9][0-9]*$/;
@@ -107,7 +109,8 @@ export function createApiHandler(dependencies: ApiDependencies): (request: Reque
       if (etagMatches(request.headers.get("If-None-Match"), etag)) return response(null, 304, cacheHeaders);
       return json(article, 200, cacheHeaders);
     } catch (caught) {
-      if (caught instanceof AssetValidationError || caught instanceof AssetLoadCapacityError || caught instanceof EmptyCorpusError) {
+      if (caught instanceof AssetValidationError || caught instanceof AssetLoadCapacityError ||
+          caught instanceof AssetUnavailableError || caught instanceof EmptyCorpusError) {
         return error(503, "assets_unavailable");
       }
       console.error("HTTP API request failed", caught);
