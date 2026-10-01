@@ -174,28 +174,27 @@ reviewing bounds. Full scans remain an explicit reconciliation mode with fixed
 403 responses during a long scan); incremental scans retain the one-second
 pace. `export-only` requires an exact lowercase 40-hex commit reachable from the
 published `data` branch and retries derivative artifacts without changing data.
-Successful changed updates upload all aggregate forms plus provenance as a
-GitHub Actions artifact and explicitly call the reusable Telegram build with the
-same data SHA and exact default-branch source SHA. The reusable consumer accepts
-only the default-branch update workflow's schedule/manual contexts, while its
-direct path remains limited to default-branch pushes. No-change runs make no
-commit and do not rebuild derivatives.
+Successful changed updates upload all aggregate forms plus provenance and explicitly
+call the reusable Worker build with the same newly published data SHA and exact
+default-branch source SHA. (`GITHUB_TOKEN` pushes do not start a second workflow.)
+A direct default-branch push independently resolves and pins the published `data`
+head once. Both paths build and test public Static Assets; Cloudflare deployment is
+skipped unless the repository variable `CLOUDFLARE_DEPLOY_ENABLED` is exactly
+`true`. No-change and export-only runs do not invoke this deployment path.
 
-Only the two DockerHub secrets required by the reusable image job are forwarded;
-the workflow does not use broad secret inheritance. These source-level event,
-ref, caller-path, and SHA checks make the checked-in workflow fail closed when
-it is accidentally dispatched against a feature/non-default ref. They are not
-a security boundary against a same-repository actor who can modify and execute
-a workflow (including removing these checks), nor against a repository
-administrator who can change Actions settings. Enforcing that stronger threat
-model requires protected environments or repository policy outside this
-source-only change.
+Only the named `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` values are
+forwarded; broad secret inheritance is forbidden. They are unavailable to the
+build job and consumed only by the gated, serialized deploy job after current
+`master` and `data` still match the tested generation. The token should be scoped
+to the target account and Worker Scripts edit permission (plus the minimum Static
+Assets permission Cloudflare requires). Protect the `cloudflare-production`
+environment and restrict repository variable/secret administration.
 
-The workflow uses the repository's existing `DOCKERHUB_USERNAME` and
-`DOCKERHUB_TOKEN` secrets for image publication. No PAT, Pages action, or new
-storage service is required. The repository owner may optionally select the
-`data` branch/root in GitHub Pages settings; repository article files and the
-branch archive remain the primary distribution.
+These source-level event, default-ref, caller-path, exact-SHA, reachable-data, and
+stale-generation checks fail closed for pull requests, forks, feature refs, wrong
+callers, and superseded builds. They do not defend against an administrator who
+can rewrite workflow or repository settings; branch/environment protection is the
+required outer boundary.
 
 ## Compatibility and completed cutover
 
@@ -210,13 +209,10 @@ files or an exact-commit v2 export.
 and its tests use small offline fixtures. If historical migration investigation
 is necessary, retrieve old inputs explicitly from a pre-cutover Git commit into
 a temporary directory; do not restore or commit those large duplicate blobs.
-The legacy Web and Telegram applications are obsolete and await rebuilding
-against the current data source. Their implementation code is unchanged by this
-cleanup, and no compatibility with the removed dataset paths is promised.
-
-The Telegram container consumes the v2 ID-keyed minimal projection. Its workflow
-now generates that projection from an explicit data commit instead of copying a
-mutable source-tree aggregate. Tests and pull requests never publish images.
+The obsolete Web/Fission/Lambda/Docker and Telegram container implementations
+were removed after the Cloudflare Worker replacement was validated. The parser
+and canonical `data` branch remain separate; Worker assets are deterministic,
+public derivative data generated from an exact reachable DATA commit.
 
 ## Tests
 

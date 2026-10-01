@@ -5,3 +5,5 @@ worker/node_modules/
 worker/test/generated-assets/
 worker/.wrangler/
 worker/dist/
+worker/dist-deployment/
+worker/generated-assets/
