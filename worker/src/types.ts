@@ -1,18 +1,18 @@
 export interface MediaItem {
-  type: string;
-  url: string;
-  alt: string;
+  readonly type: string;
+  readonly url: string;
+  readonly alt: string;
 }
 
 export interface Article {
-  id: string;
-  title: string;
-  date: string;
-  author: string;
-  editor: string;
-  text: string[];
-  content_type?: string;
-  media?: MediaItem[];
+  readonly id: string;
+  readonly title: string;
+  readonly date: string;
+  readonly author: string;
+  readonly editor: string;
+  readonly text: readonly string[];
+  readonly content_type?: string;
+  readonly media?: readonly MediaItem[];
 }
 
 export type ArticleMetadata = Pick<Article, "id" | "title" | "date" | "author" | "editor">;

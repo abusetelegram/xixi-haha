@@ -98,6 +98,66 @@ describe("AssetRepository generated fixture", () => {
     expect(calls.size).toBe(4);
   });
 
+  it("deep-freezes cached articles without changing cache or quote behavior", async () => {
+    const { store, calls } = repository();
+    const first = (await store.getArticle(1))!;
+    const mediaArticle = (await store.getArticle(2))!;
+    const firstOriginal = {
+      id: "1",
+      title: "First",
+      date: "2020-01-01 00:00:00",
+      author: "A",
+      editor: "E",
+      text: ["", " ", "  first exact  ", "second"],
+    };
+    const mediaOriginal = {
+      id: "2",
+      title: "Empty media",
+      date: "2020-01-02 00:00:00",
+      author: "B",
+      editor: "F",
+      text: [],
+      content_type: "image",
+      media: [{ type: "image", url: "https://example.test/image.jpg", alt: "" }],
+    };
+
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(Object.isFrozen(first.text)).toBe(true);
+    expect(Object.isFrozen(mediaArticle.media)).toBe(true);
+    expect(Object.isFrozen(mediaArticle.media![0])).toBe(true);
+    expect(() => { (first as { title: string }).title = "mutated"; }).toThrow(TypeError);
+    expect(() => { (first.text as string[]).push("mutated"); }).toThrow(TypeError);
+    expect(() => { (first.text as string[])[2] = "mutated"; }).toThrow(TypeError);
+    expect(() => { (mediaArticle.media![0] as { url: string }).url = "https://example.test/mutated.jpg"; }).toThrow(TypeError);
+    expect(() => { (mediaArticle.media as Array<{ type: string; url: string; alt: string }>)[0] = { type: "image", url: "mutated", alt: "mutated" }; }).toThrow(TypeError);
+    expect(() => { (mediaArticle.media as Array<{ type: string; url: string; alt: string }>).push({ type: "image", url: "mutated", alt: "mutated" }); }).toThrow(TypeError);
+
+    expect(await store.getArticle(1)).toBe(first);
+    expect(await store.getArticle(1)).toEqual(firstOriginal);
+    expect(await store.getArticle(2)).toBe(mediaArticle);
+    expect(await store.getArticle(2)).toEqual(mediaOriginal);
+    expect(calls.get(`_data/${"b".repeat(40)}/shards/001.json`)).toBe(1);
+    expect(calls.get(`_data/${"b".repeat(40)}/shards/002.json`)).toBe(1);
+
+    await expect(new QuoteService(store, new Sequence([0])).randomQuote()).resolves.toEqual({
+      quote: "  first exact  ",
+      paragraphIndex: 2,
+      article: { id: "1", title: "First", date: "2020-01-01 00:00:00", author: "A", editor: "E" },
+      sourceUrl: "http://jhsjk.people.cn/article/1",
+      selection: "paragraph",
+      corpus: { sourceSha: "a".repeat(40), dataSha: "b".repeat(40) },
+    });
+    expect(calls.get(`_data/${"b".repeat(40)}/shards/001.json`)).toBe(1);
+
+    await store.getArticle(3);
+    const reloadedMediaArticle = (await store.getArticle(2))!;
+    expect(reloadedMediaArticle).toEqual(mediaOriginal);
+    expect(Object.isFrozen(reloadedMediaArticle)).toBe(true);
+    expect(Object.isFrozen(reloadedMediaArticle.media)).toBe(true);
+    expect(Object.isFrozen(reloadedMediaArticle.media![0])).toBe(true);
+    expect(calls.get(`_data/${"b".repeat(40)}/shards/002.json`)).toBe(2);
+  });
+
   it("deduplicates concurrent shard loads and bounds the versioned LRU", async () => {
     const { store, calls } = repository(undefined, 1);
     await Promise.all([store.getArticle(1), store.getArticle(5)]);

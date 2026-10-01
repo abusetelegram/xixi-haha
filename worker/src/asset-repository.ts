@@ -227,7 +227,7 @@ function parseManifest(value: unknown, metadata: WorkerMetadata): Manifest {
   }, paragraphIndex };
 }
 
-function parseMedia(value: unknown): MediaItem[] {
+function parseMedia(value: unknown): readonly MediaItem[] {
   if (!Array.isArray(value)) throw new AssetValidationError("article media must be an array");
   return value.map((entry) => {
     const record = object(entry, "media item");
@@ -250,7 +250,7 @@ function parseArticle(value: unknown): Article {
   const hasContentType = "content_type" in record;
   const hasMedia = "media" in record;
   if (hasContentType !== hasMedia) throw new AssetValidationError("article media fields must be paired");
-  const article: Article = {
+  const article = {
     id,
     title: string(record.title, "article title"),
     date: string(record.date, "article date"),
@@ -259,10 +259,22 @@ function parseArticle(value: unknown): Article {
     text: [...record.text] as string[],
   };
   if (hasContentType) {
-    article.content_type = string(record.content_type, "article content type");
-    article.media = parseMedia(record.media);
+    return {
+      ...article,
+      content_type: string(record.content_type, "article content type"),
+      media: parseMedia(record.media),
+    };
   }
   return article;
+}
+
+function freezeArticle(article: Article): Article {
+  Object.freeze(article.text);
+  if (article.media !== undefined) {
+    for (const media of article.media) Object.freeze(media);
+    Object.freeze(article.media);
+  }
+  return Object.freeze(article);
 }
 
 class BoundedAsyncLru<K, V> {
@@ -419,6 +431,7 @@ export class AssetRepository {
         const contentCount = articles[position]!.text.reduce((count, paragraph) => count + (isSelectableParagraph(paragraph) ? 1 : 0), 0);
         if (contentCount !== indexedCount) throw new AssetValidationError("shard paragraph content does not match index offsets");
       }
+      for (const article of articles) freezeArticle(article);
       return articles;
     });
   }
