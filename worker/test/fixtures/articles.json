@@ -1,0 +1,5 @@
+[
+  {"id":"1","title":"First","date":"2020-01-01 00:00:00","author":"A","editor":"E","text":["", " ", "  first exact  ", "second"]},
+  {"id":"2","title":"Empty media","date":"2020-01-02 00:00:00","author":"B","editor":"F","text":[],"content_type":"image","media":[{"type":"image","url":"https://example.test/image.jpg","alt":""}]},
+  {"id":"5","title":"Last","date":"2020-01-03 00:00:00","author":"C","editor":"G","text":["　", "​"]}
+]
