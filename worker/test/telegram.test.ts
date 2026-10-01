@@ -66,6 +66,23 @@ describe("Telegram webhook", () => {
     expect(telegramFetch).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["bot token", { botToken: "https://evil.example/token", webhookSecret: SECRET, botUsername: "xixi_haha_bot" }],
+    ["short webhook secret", { botToken: TOKEN, webhookSecret: "short", botUsername: "xixi_haha_bot" }],
+    ["unsafe webhook secret", { botToken: TOKEN, webhookSecret: `${"s".repeat(39)}!`, botUsername: "xixi_haha_bot" }],
+    ["bot username", { botToken: TOKEN, webhookSecret: SECRET, botUsername: "@xixi_haha_bot" }],
+  ] satisfies [string, TelegramConfig][])("rejects unsafe %s configuration before reading the body", async (_label, config) => {
+    const { handler, randomQuote, telegramFetch } = mockDependencies();
+    const response = await handler(new Request("https://worker.example/telegram/webhook", {
+      method: "POST",
+      headers: { "X-Telegram-Bot-Api-Secret-Token": SECRET },
+      body: "not json",
+    }), config);
+    expect(response.status).toBe(503);
+    expect(randomQuote).not.toHaveBeenCalled();
+    expect(telegramFetch).not.toHaveBeenCalled();
+  });
+
   it("returns 400 for malformed updates and enforces the streamed body cap", async () => {
     const { handler } = mockDependencies();
     expect((await handler(new Request("https://worker.example/telegram/webhook", {
@@ -98,6 +115,35 @@ describe("Telegram webhook", () => {
   it.each(["hello", "random keyword", "/yiyan@other_bot", "/unknown@xixi_haha_bot"])("ignores unsupported text %s", async (text) => {
     const { handler, randomQuote, telegramFetch } = mockDependencies();
     expect((await handler(webhook(message(text)), CONFIG)).status).toBe(200);
+    expect(randomQuote).not.toHaveBeenCalled();
+    expect(telegramFetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["photo", { update_id: 20, message: { message_id: 9, chat: { id: -1001 }, photo: [{ file_id: "photo", width: 1, height: 1 }] } }],
+    ["sticker", { update_id: 21, message: { message_id: 9, chat: { id: -1001 }, sticker: { file_id: "sticker", width: 1, height: 1 } } }],
+    ["location", { update_id: 22, message: { message_id: 9, chat: { id: -1001 }, location: { latitude: 1, longitude: 2 } } }],
+    ["service", { update_id: 23, message: { message_id: 9, chat: { id: -1001 }, new_chat_title: "renamed" } }],
+    ["callback root update", { update_id: 24, callback_query: { id: "callback" } }],
+    ["poll root update", { update_id: 25, poll: { id: "poll" } }],
+  ])("acknowledges unsupported valid %s updates without quote or transport calls", async (_label, update) => {
+    const { handler, randomQuote, telegramFetch } = mockDependencies();
+    expect((await handler(webhook(update), CONFIG)).status).toBe(200);
+    expect(randomQuote).not.toHaveBeenCalled();
+    expect(telegramFetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["update_id", { update_id: "1" }],
+    ["message object", { update_id: 30, message: null }],
+    ["message_id", { update_id: 31, message: { message_id: "9", chat: { id: -1001 } } }],
+    ["chat", { update_id: 32, message: { message_id: 9, chat: null } }],
+    ["chat id", { update_id: 33, message: { message_id: 9, chat: { id: null } } }],
+    ["optional text", { update_id: 34, message: { message_id: 9, chat: { id: -1001 }, text: 123 } }],
+    ["inline query id", { update_id: 35, inline_query: { id: 123 } }],
+  ])("rejects malformed known %s fields", async (_label, update) => {
+    const { handler, randomQuote, telegramFetch } = mockDependencies();
+    expect((await handler(webhook(update), CONFIG)).status).toBe(400);
     expect(randomQuote).not.toHaveBeenCalled();
     expect(telegramFetch).not.toHaveBeenCalled();
   });
@@ -156,6 +202,25 @@ describe("Telegram webhook", () => {
     expect(telegramFetch).toHaveBeenCalledTimes(1);
     const payload = JSON.parse(String(telegramFetch.mock.calls[0]![1]?.body));
     expect(payload.text).toMatch(/\n\n来源：<a href=/u);
+  });
+
+  it("routes non-text messages through the real Worker webhook and acknowledges without loading assets or calling Telegram", async () => {
+    const assetFetch = vi.fn(async () => new Response("unexpected"));
+    const telegramFetch = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ ok: true })));
+    const worker = createWorkerHandler({
+      ASSETS: { fetch: assetFetch } as unknown as Fetcher,
+      BOT_TOKEN: TOKEN,
+      TELEGRAM_WEBHOOK_SECRET: SECRET,
+      BOT_USERNAME: "xixi_haha_bot",
+    }, telegramFetch);
+    const response = await worker(webhook({
+      update_id: 40,
+      message: { message_id: 9, chat: { id: -1001 }, photo: [{ file_id: "photo", width: 1, height: 1 }] },
+    }));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("access-control-allow-origin")).toBeNull();
+    expect(assetFetch).not.toHaveBeenCalled();
+    expect(telegramFetch).not.toHaveBeenCalled();
   });
 
   it("is routed before the CORS API and fails closed when secrets are absent", async () => {

@@ -26,7 +26,7 @@ type ChatId = number | string;
 interface TelegramMessage {
   message_id: number;
   chat: { id: ChatId };
-  text: string;
+  text?: string;
 }
 
 interface TelegramInlineQuery {
@@ -104,10 +104,12 @@ function asUpdate(value: unknown): TelegramUpdate | undefined {
   if ("message" in value && value.message !== undefined) {
     const message = value.message;
     if (typeof message !== "object" || message === null || !("message_id" in message) || !Number.isSafeInteger(message.message_id)
-      || !("text" in message) || typeof message.text !== "string" || !("chat" in message)
-      || typeof message.chat !== "object" || message.chat === null || !("id" in message.chat)
-      || (typeof message.chat.id !== "number" && typeof message.chat.id !== "string")) return undefined;
-    update.message = { message_id: message.message_id as number, text: message.text, chat: { id: message.chat.id } };
+      || !("chat" in message) || typeof message.chat !== "object" || message.chat === null || !("id" in message.chat)
+      || (typeof message.chat.id !== "number" && typeof message.chat.id !== "string")
+      || ("text" in message && typeof message.text !== "string")) return undefined;
+    const parsedMessage: TelegramMessage = { message_id: message.message_id as number, chat: { id: message.chat.id } };
+    if ("text" in message) parsedMessage.text = message.text as string;
+    update.message = parsedMessage;
   }
   if ("inline_query" in value && value.inline_query !== undefined) {
     const inline = value.inline_query;
@@ -147,7 +149,8 @@ export function createTelegramHandler(dependencies: TelegramDependencies): (requ
     if (update === undefined) return jsonError(400, "malformed_update");
 
     try {
-      if (update.message !== undefined && addressedCommand(update.message.text, config.botUsername) !== undefined) {
+      if (update.message !== undefined && typeof update.message.text === "string"
+        && addressedCommand(update.message.text, config.botUsername) !== undefined) {
         const quote = await dependencies.quoteService.randomQuote("paragraph");
         await callTelegram(config.botToken, "sendMessage", {
           chat_id: update.message.chat.id,
