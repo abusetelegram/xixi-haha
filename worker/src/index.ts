@@ -6,15 +6,15 @@ const ENTRY_BYTES = 8;
 const UINT32_SPACE = 0x1_0000_0000;
 
 export interface ParagraphIndexEntry {
-  articleId: number;
-  cumulativeOffset: number;
+  readonly articleId: number;
+  readonly cumulativeOffset: number;
 }
 
 export interface ParagraphIndex {
-  formatVersion: number;
-  articleCount: number;
-  selectableParagraphCount: number;
-  entries: readonly ParagraphIndexEntry[];
+  readonly formatVersion: number;
+  readonly articleCount: number;
+  readonly selectableParagraphCount: number;
+  readonly entries: readonly ParagraphIndexEntry[];
 }
 
 export interface SelectedRank extends ParagraphIndexEntry {
@@ -52,7 +52,9 @@ export function decodeParagraphIndex(bytes: Uint8Array): ParagraphIndex {
   if ((entries.at(-1)?.cumulativeOffset ?? 0) !== selectableParagraphCount) {
     throw new AssetValidationError("paragraph index final offset does not match total");
   }
-  return { formatVersion, articleCount, selectableParagraphCount, entries };
+  entries.forEach((entry) => Object.freeze(entry));
+  Object.freeze(entries);
+  return Object.freeze({ formatVersion, articleCount, selectableParagraphCount, entries });
 }
 
 export function locateGlobalRank(index: ParagraphIndex, rank: number): SelectedRank {

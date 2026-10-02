@@ -7,6 +7,7 @@ import {
   AssetRepository,
   AssetValidationError,
   QuoteService,
+  locateGlobalRank,
   type ContentHasher,
   type RandomSource,
 } from "../src/main";
@@ -96,6 +97,54 @@ describe("AssetRepository generated fixture", () => {
     expect([...calls.keys()].map((path) => basename(path)).sort()).toEqual(["manifest.json", "paragraph-index.bin", "worker-data.json", "002.json"].sort());
     expect(await store.getArticle(4)).toBeUndefined();
     expect(calls.size).toBe(4);
+  });
+
+  it("deep-freezes the cached paragraph index without changing selection or cache behavior", async () => {
+    const { store, calls } = repository();
+    await store.getArticle(5);
+    const index = await store.paragraphIndex();
+    const original = {
+      formatVersion: 1,
+      articleCount: 4,
+      selectableParagraphCount: 4,
+      entries: [
+        { articleId: 1, cumulativeOffset: 2 },
+        { articleId: 2, cumulativeOffset: 2 },
+        { articleId: 3, cumulativeOffset: 3 },
+        { articleId: 5, cumulativeOffset: 4 },
+      ],
+    };
+    const callsBeforeMutation = new Map(calls);
+    const attempts = [
+      () => { (index as { formatVersion: number }).formatVersion = 2; },
+      () => { (index as { articleCount: number }).articleCount = 0; },
+      () => { (index as { selectableParagraphCount: number }).selectableParagraphCount = 0; },
+      () => { (index.entries[0] as { articleId: number }).articleId = 99; },
+      () => { (index.entries[0] as { cumulativeOffset: number }).cumulativeOffset = 0; },
+      () => { (index.entries as Array<{ articleId: number; cumulativeOffset: number }>)[0] = { articleId: 99, cumulativeOffset: 0 }; },
+      () => { (index.entries as Array<{ articleId: number; cumulativeOffset: number }>).push({ articleId: 99, cumulativeOffset: 99 }); },
+    ];
+
+    for (const attempt of attempts) {
+      try { attempt(); } catch (error) { expect(error).toBeInstanceOf(TypeError); }
+    }
+
+    expect(Object.isFrozen(index)).toBe(true);
+    expect(Object.isFrozen(index.entries)).toBe(true);
+    expect(index.entries.every(Object.isFrozen)).toBe(true);
+    expect(index).toEqual(original);
+    expect(await store.paragraphIndex()).toBe(index);
+    expect(locateGlobalRank(index, 0)).toMatchObject({ articleId: 1, localRank: 0 });
+    expect(locateGlobalRank(index, 3)).toMatchObject({ articleId: 5, localRank: 0 });
+    await expect(new QuoteService(store, new Sequence([3])).randomQuote()).resolves.toEqual({
+      quote: "​",
+      paragraphIndex: 1,
+      article: { id: "5", title: "Last", date: "2020-01-03 00:00:00", author: "C", editor: "G" },
+      sourceUrl: "http://jhsjk.people.cn/article/5",
+      selection: "paragraph",
+      corpus: { sourceSha: "a".repeat(40), dataSha: "b".repeat(40) },
+    });
+    expect(calls).toEqual(callsBeforeMutation);
   });
 
   it("deep-freezes cached articles without changing cache or quote behavior", async () => {
