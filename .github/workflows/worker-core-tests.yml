@@ -52,3 +52,13 @@ jobs:
         working-directory: worker
       - run: npm test
         working-directory: worker
+      - name: Test local workerd with Static Assets binding
+        run: npm run test:runtime
+        working-directory: worker
+        env:
+          WRANGLER_SEND_METRICS: 'false'
+      - name: Package Worker without deployment
+        run: npm run package:dry-run
+        working-directory: worker
+        env:
+          WRANGLER_SEND_METRICS: 'false'

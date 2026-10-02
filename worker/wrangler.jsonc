@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "xixi-haha-api",
+  "main": "src/worker.ts",
+  "compatibility_date": "2025-09-24",
+  "assets": {
+    "directory": "./test/generated-assets",
+    "binding": "ASSETS",
+    "run_worker_first": true,
+    "html_handling": "none",
+    "not_found_handling": "none"
+  }
+}

@@ -3,3 +3,5 @@
 __pycache__/
 worker/node_modules/
 worker/test/generated-assets/
+worker/.wrangler/
+worker/dist/
