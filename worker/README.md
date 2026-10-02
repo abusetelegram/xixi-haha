@@ -18,7 +18,7 @@ const legacyWeight = await quotes.randomQuote("article"); // uniform nonempty ar
 const article = await repository.getArticle("40140589");  // full projection, including media/empty text
 ```
 
-`QuoteService.randomQuote()` returns exact quote whitespace, its original `text` array index, article metadata, the historical source URL, selection mode, and `{sourceSha,dataSha}` provenance. Both the HTTP and future Telegram adapters share this service rather than implement selection or asset parsing.
+`QuoteService.randomQuote()` returns exact quote whitespace, its original `text` array index, article metadata, the historical source URL, selection mode, and `{sourceSha,dataSha}` provenance. Both the HTTP and Telegram adapters share this service rather than implement selection or asset parsing.
 
 `AssetRepository` strictly checks deployment metadata, manifest SHA/version/provenance, big-endian index size/counts/ranges, shard checksums/paths/membership, record schemas, and per-article selectable counts. It cold-loads only the small manifest/index and one selected shard. A version-keyed fulfilled-value LRU (default two shards, configurable 1–8) is separate from the bounded in-flight registry (default four unique shard loads, configurable 2–8). Same-key work always deduplicates, including across LRU eviction; failure is cleaned up for retry. Excess different-key concurrency throws retryable `AssetLoadCapacityError` before fetching. HTTP and Telegram adapters must map that overload to a retryable `503` rather than silently selecting another asset/version.
 
@@ -63,3 +63,17 @@ WRANGLER_SEND_METRICS=false npm run package:dry-run
 `test:runtime` starts local workerd and exercises the real Static Assets binding; `package:dry-run` packages without authenticating or deploying. The ignored tiny assets are generated through `parse/export_worker.py`; tests also consume the committed Python binary and whitespace golden fixtures directly. No generated corpus assets or index are committed.
 
 For local screening against a separately generated real corpus, bundle and run `scripts/benchmark-assets.ts <asset-directory>`. Its cold/warm timings are not a Cloudflare edge CPU guarantee.
+
+## Build and deployment
+
+`.github/workflows/deploy-worker.yml` is the only application publisher. A push to the actual default branch pins the published `data` head once; a successful changed-data update calls the same reusable workflow explicitly because its `GITHUB_TOKEN` push cannot trigger another workflow. Pull requests, forks, non-default refs, arbitrary manual callers, and mismatched source SHAs cannot enter the trusted job.
+
+Every run canonically validates DATA, deterministically exports `generated-assets`, enforces fewer than 20,000 files and less than 25 MiB per file, verifies metadata/manifest checksums and exact `{sourceSha,dataSha}` provenance, then runs typecheck, unit tests, local workerd against those actual assets, and a Wrangler dry-run package. The resulting artifact contains code packaging and intentionally public corpus assets; it contains neither `BOT_TOKEN` nor `TELEGRAM_WEBHOOK_SECRET`.
+
+Deployment is **inactive until operator setup**. The build/test/artifact path always runs without Cloudflare credentials. The deploy job runs only when repository variable `CLOUDFLARE_DEPLOY_ENABLED` is exactly `true`, is serialized, rechecks that live `master` and `data` still equal the tested generation, revalidates provenance, and deploys code and matching Static Assets together. Configure only named `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` secrets in the protected `cloudflare-production` environment; do not use broad secret inheritance. Scope the token to the target account and minimum Worker/Static Assets edit permissions.
+
+Cloudflare free-plan request, CPU, build, and Static Assets quotas can change and are operator constraints, not guarantees made by this repository. Check current Cloudflare limits before enabling production. A quota or stale-generation failure must stop rather than deploy only code or only assets.
+
+Rollback means deploying a reviewed default-branch source commit together with a freshly validated export for an exact reachable DATA commit. Never edit or upload `worker-data.json`, the manifest, or shards independently: the root metadata is the atomic version pointer and runtime provenance must match the deployed code/assets generation.
+
+Telegram activation remains separate and manual after deployment: provision `BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET` with Cloudflare's secret mechanism, then register the exact webhook URL manually with Telegram as described above. Neither build nor deploy performs `getMe`, `setWebhook`, or sends a bot message.

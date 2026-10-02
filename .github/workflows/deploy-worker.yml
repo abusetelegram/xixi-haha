@@ -1,0 +1,190 @@
+name: build and deploy Cloudflare Worker
+
+on:
+  push:
+    branches: [master]
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Exact trusted default-branch source commit
+        required: true
+        type: string
+      data_sha:
+        description: Exact reachable published data commit
+        required: true
+        type: string
+    secrets:
+      CLOUDFLARE_API_TOKEN:
+        required: false
+      CLOUDFLARE_ACCOUNT_ID:
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloudflare-worker-production
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: pin trusted source and published data
+    if: >-
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      ((github.event_name == 'push' &&
+        github.workflow_ref == format('{0}/.github/workflows/deploy-worker.yml@{1}', github.repository, github.ref) &&
+        inputs.source_sha == '' && inputs.data_sha == '') ||
+       ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+        github.workflow_ref == format('{0}/.github/workflows/update-data.yml@{1}', github.repository, github.ref) &&
+        inputs.source_sha == github.sha && inputs.data_sha != ''))
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.refs.outputs.source_sha }}
+      data_sha: ${{ steps.refs.outputs.data_sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - id: refs
+        name: Validate immutable refs
+        env:
+          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+          REQUESTED_DATA_SHA: ${{ inputs.data_sha }}
+        run: |
+          set -euo pipefail
+          source_sha="$(git rev-parse HEAD)"
+          test "$source_sha" = "${{ github.sha }}"
+          if [[ "${{ github.event_name }}" == push ]]; then
+            test -z "$REQUESTED_SOURCE_SHA"
+            test -z "$REQUESTED_DATA_SHA"
+            data_sha="$(git ls-remote --exit-code origin refs/heads/data | awk 'NR == 1 {print $1}')"
+            [[ "$data_sha" =~ ^[0-9a-f]{40}$ ]]
+          else
+            [[ "$REQUESTED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$REQUESTED_DATA_SHA" =~ ^[0-9a-f]{40}$ ]]
+            test "$source_sha" = "$REQUESTED_SOURCE_SHA"
+            data_sha="$REQUESTED_DATA_SHA"
+          fi
+          git fetch --no-tags origin refs/heads/data:refs/remotes/origin/data
+          git cat-file -e "$data_sha^{commit}"
+          git merge-base --is-ancestor "$data_sha" refs/remotes/origin/data
+          printf 'source_sha=%s\ndata_sha=%s\n' "$source_sha" "$data_sha" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: validate, export, test, and package
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: code
+          ref: ${{ needs.resolve.outputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: data
+          ref: ${{ needs.resolve.outputs.data_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22.20.0'
+          cache: npm
+          cache-dependency-path: code/worker/package-lock.json
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: '0.12.18'
+          enable-cache: true
+          cache-dependency-glob: code/uv.lock
+      - name: Install locked toolchains
+        working-directory: code
+        run: |
+          uv python install '3.13'
+          uv sync --locked --python '3.13'
+          npm ci --ignore-scripts --no-audit --no-fund --prefix worker
+      - name: Canonically validate and deterministically export public Static Assets
+        working-directory: code
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ needs.resolve.outputs.source_sha }}"
+          test "$(git -C ../data rev-parse HEAD)" = "${{ needs.resolve.outputs.data_sha }}"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          test -z "$(git -C ../data status --porcelain=v1 --untracked-files=all)"
+          uv run --frozen --offline --python '3.13' python parse/corpus.py validate --data-dir ../data
+          uv run --frozen --offline --python '3.13' python parse/export_worker.py \
+            --data-dir ../data --output-dir worker/generated-assets \
+            --source-sha '${{ needs.resolve.outputs.source_sha }}' \
+            --data-sha '${{ needs.resolve.outputs.data_sha }}'
+          uv run --frozen --offline --python '3.13' python worker/scripts/validate-deployment.py \
+            worker/generated-assets '${{ needs.resolve.outputs.source_sha }}' '${{ needs.resolve.outputs.data_sha }}'
+          uv run --frozen --offline --python '3.13' python parse/export_worker.py \
+            --data-dir ../data --output-dir "$RUNNER_TEMP/reexported-worker-assets" \
+            --source-sha '${{ needs.resolve.outputs.source_sha }}' \
+            --data-sha '${{ needs.resolve.outputs.data_sha }}'
+          diff -qr worker/generated-assets "$RUNNER_TEMP/reexported-worker-assets"
+          uv run --frozen --offline --python '3.13' python worker/scripts/generate-test-assets.py
+      - name: Typecheck, unit test, local workerd test, and dry-run package
+        working-directory: code/worker
+        env:
+          WRANGLER_SEND_METRICS: 'false'
+        run: |
+          npm run typecheck
+          npm test
+          npm run test:runtime:deployment
+          npm run package:deployment
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cloudflare-worker-${{ needs.resolve.outputs.source_sha }}-${{ needs.resolve.outputs.data_sha }}
+          path: |
+            code/worker/generated-assets
+            code/worker/dist-deployment
+          if-no-files-found: error
+          retention-days: 14
+
+  deploy:
+    name: deploy exact tested generation
+    needs: [resolve, build]
+    if: vars.CLOUDFLARE_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: cloudflare-production
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.resolve.outputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22.20.0'
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: worker
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: cloudflare-worker-${{ needs.resolve.outputs.source_sha }}-${{ needs.resolve.outputs.data_sha }}
+          path: worker/release
+      - name: Reject stale generation and revalidate provenance before deploy
+        env:
+          SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+          DATA_SHA: ${{ needs.resolve.outputs.data_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git ls-remote --exit-code origin refs/heads/master | awk 'NR == 1 {print $1}')" = "$SOURCE_SHA"
+          test "$(git ls-remote --exit-code origin refs/heads/data | awk 'NR == 1 {print $1}')" = "$DATA_SHA"
+          python3 worker/scripts/validate-deployment.py worker/release/generated-assets "$SOURCE_SHA" "$DATA_SHA"
+      - name: Atomically deploy matching code and public assets
+        working-directory: worker
+        env:
+          WRANGLER_SEND_METRICS: 'false'
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN"
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+          rm -rf generated-assets
+          mv release/generated-assets generated-assets
+          node node_modules/wrangler/bin/wrangler.js deploy --config wrangler.deploy.jsonc

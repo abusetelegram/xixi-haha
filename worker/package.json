@@ -11,7 +11,9 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:runtime": "node scripts/runtime-test.mjs",
-    "package:dry-run": "wrangler deploy --dry-run --outdir dist"
+    "test:runtime:deployment": "WRANGLER_CONFIG=wrangler.deploy.jsonc node scripts/runtime-test.mjs",
+    "package:dry-run": "wrangler deploy --dry-run --outdir dist",
+    "package:deployment": "wrangler deploy --config wrangler.deploy.jsonc --dry-run --outdir dist-deployment"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20260930.2",

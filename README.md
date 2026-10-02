@@ -35,7 +35,9 @@ Telegram Bot: [@xixi_haha_bot](https://t.me/xixi_haha_bot)
 GitHub Pages 是可选展示入口，不是数据读取前提。旧的
 `master/parse/result-min.json`、`master/parse/result-full.tgz` 和整个
 `master/parse/v1/` 原始路径已明确移除；请从 `data` 分支读取规范的逐文章 JSON，或从指定
-DATA commit 对应的成功 Actions 运行下载 v2 聚合导出。旧的 Web/Telegram 应用需要基于新数据源重建；本次清理未改动其实现代码，也不保证现有应用可继续使用已删除的数据路径。
+DATA commit 对应的成功 Actions 运行下载 v2 聚合导出。Cloudflare Worker 的 Static Assets
+也是由精确、可达的 DATA commit 确定性生成；这些运行时资产是公开内容，不得包含 bot token、
+webhook secret 或其他秘密。
 
 ## 更新数据
 
@@ -53,9 +55,21 @@ uv run --locked python parse/corpus.py validate \
 
 每周自动流程默认从最新列表页开始增量扫描，在连续两个页面都只含已有文章时停止；全量扫描仅用于显式、人工监督的可选核对。流程只新增文章，遇到不完整扫描、已有文章变化、删除、推送竞争或导出失败都会停止。聚合文件由精确的 data commit 生成并作为 GitHub Actions artifact 提供，不提交到 data 分支。
 
-## Web服务
+## Cloudflare Worker
 
-见`web/`
+`worker/` 是唯一的 Web/API/Telegram 运行时实现。它提供公开随机语录/API、静态语料资产和
+`POST /telegram/webhook`；旧 Web、Fission、Lambda、Docker 和 Telegram container 已移除。
+详细路由、免费额度注意事项、部署、回滚、本地测试和 bot 人工配置见
+[`worker/README.md`](./worker/README.md)。
+
+部署默认关闭：只有默认分支的受信 workflow、精确 source/DATA SHA、完整构建测试通过，且仓库变量
+`CLOUDFLARE_DEPLOY_ENABLED` 严格等于 `true` 时才会使用命名的 Cloudflare 凭据。Telegram token、
+webhook secret 和 `setWebhook` 注册都是运维人员在 Cloudflare/Telegram 中执行的独立人工步骤；
+仓库 workflow 不注册 webhook，也不会在测试中调用真实 bot。此服务无持久去重，采用至少一次处理，
+超时或非 2xx 后 Telegram 重投可能产生重复回复，不承诺 exactly-once。
+
+回滚必须重新运行/提交受信默认分支版本，使代码和由同一 provenance 验证的资产一起部署；不要单独
+替换公开资产。
 
 ## 没了？
 
