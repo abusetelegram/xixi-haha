@@ -18,7 +18,7 @@ const legacyWeight = await quotes.randomQuote("article"); // uniform nonempty ar
 const article = await repository.getArticle("40140589");  // full projection, including media/empty text
 ```
 
-`QuoteService.randomQuote()` returns exact quote whitespace, its original `text` array index, article metadata, the historical source URL, selection mode, and `{sourceSha,dataSha}` provenance. Both the HTTP and future Telegram adapters share this service rather than implement selection or asset parsing.
+`QuoteService.randomQuote()` returns exact quote whitespace, its original `text` array index, article metadata, the historical source URL, selection mode, and `{sourceSha,dataSha}` provenance. Both the HTTP and Telegram adapters share this service rather than implement selection or asset parsing.
 
 `AssetRepository` strictly checks deployment metadata, manifest SHA/version/provenance, big-endian index size/counts/ranges, shard checksums/paths/membership, record schemas, and per-article selectable counts. It cold-loads only the small manifest/index and one selected shard. A version-keyed fulfilled-value LRU (default two shards, configurable 1–8) is separate from the bounded in-flight registry (default four unique shard loads, configurable 2–8). Same-key work always deduplicates, including across LRU eviction; failure is cleaned up for retry. Excess different-key concurrency throws retryable `AssetLoadCapacityError` before fetching. HTTP and Telegram adapters must map that overload to a retryable `503` rather than silently selecting another asset/version.
 
@@ -63,3 +63,24 @@ WRANGLER_SEND_METRICS=false npm run package:dry-run
 `test:runtime` starts local workerd and exercises the real Static Assets binding; `package:dry-run` packages without authenticating or deploying. The ignored tiny assets are generated through `parse/export_worker.py`; tests also consume the committed Python binary and whitespace golden fixtures directly. No generated corpus assets or index are committed.
 
 For local screening against a separately generated real corpus, bundle and run `scripts/benchmark-assets.ts <asset-directory>`. Its cold/warm timings are not a Cloudflare edge CPU guarantee.
+
+## Build and deployment
+
+There is exactly one publisher: an operator-managed **Cloudflare native Git connection**. GitHub Actions never deploys. `.github/workflows/build-worker.yml` only pins trusted source/DATA commits, canonically validates DATA, deterministically exports and re-exports `generated-assets`, runs typecheck/unit/local-workerd checks, dry-run packages with `wrangler.deploy.jsonc`, and uploads the public artifact. A direct default-branch push resolves the published `data` head once. A successful changed-DATA update calls that reusable build explicitly because its `GITHUB_TOKEN` push cannot trigger another workflow. The source/ref/caller/reachability checks reject pull requests, forks, feature refs, arbitrary callers, and mismatched source SHAs.
+
+Configure the Cloudflare native Git build from the repository root (`/`) with these values:
+
+- Build command: `./worker/scripts/build-cloudflare.sh`
+- Production deploy command: `cd worker && node node_modules/wrangler/bin/wrangler.js deploy --config wrangler.deploy.jsonc`
+- Production branch: `master`
+- Preview deployments: disabled unless an operator deliberately defines them. Any future preview command must also pass `--config wrangler.deploy.jsonc`; the default `wrangler.jsonc` points at test fixtures and must never package a production or preview deployment.
+
+The build image must provide Git, Python 3.13, pinned `uv 0.12.18`, and Node `22.20.0`; the script fails closed on the uv and Node versions. It runs locked `uv`/`npm ci` installs, writes dependencies only to ignored roots, checks a clean exact source HEAD, resolves the public `data` branch once, checks out the selected reachable DATA commit in an isolated temporary repository, validates and exports to ignored `worker/generated-assets`, verifies descriptor hashes/provenance and deterministic re-export, then performs tests and a deployment-config dry-run. It contains no publish command or deployment credentials. `DATA_SHA=<exact reachable lowercase 40-hex>` may be set for an intentional historical rebuild; otherwise each new build uses the DATA head resolved at that build.
+
+A DATA-only GitHub update does **not** trigger or feed Cloudflare automatically. After reviewing a successful changed-data Actions run, an operator must manually request a fresh Cloudflare rebuild. That new build resolves the freshest published DATA head at build time; the GitHub artifact is validation evidence only and is not automatically consumed by Cloudflare. Do not add a webhook, API trigger, workflow deploy job, or GitHub Cloudflare credentials as a substitute.
+
+The native deploy step must publish code and `worker/generated-assets` from the same successful build. The repository's default `worker/wrangler.jsonc` remains test-only; production always selects `worker/wrangler.deploy.jsonc`. Cloudflare plan quotas and the availability of the documented tool versions in the selected build image are operator constraints to verify before enabling the connection; this repository does not claim a particular Cloudflare image supplies them.
+
+Rollback means selecting a reviewed source commit in the native Git connection and starting a manual build, optionally with an exact reachable historical `DATA_SHA`. Never edit or upload `worker-data.json`, the manifest, or shards independently: root metadata is the atomic version pointer and runtime provenance must match the deployed code/assets generation.
+
+Telegram activation remains separate and manual after deployment: provision `BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET` with Cloudflare's secret mechanism, then register the exact webhook URL manually with Telegram as described above. Neither build nor deploy performs `getMe`, `setWebhook`, or sends a bot message.

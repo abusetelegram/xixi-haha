@@ -335,8 +335,8 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  telegram:
-    name: publish Telegram image from the same data commit
+  worker:
+    name: build and validate Worker from the same new data commit
     needs:
       - update_data
       - export
@@ -346,10 +346,7 @@ jobs:
       needs.update_data.outputs.changed == 'true' && needs.export.result == 'success'
     permissions:
       contents: read
-    uses: ./.github/workflows/docker-telegram.yml
+    uses: ./.github/workflows/build-worker.yml
     with:
       source_sha: ${{ github.sha }}
       data_sha: ${{ needs.update_data.outputs.data_sha }}
-    secrets:
-      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}

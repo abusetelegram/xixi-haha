@@ -4,7 +4,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 UPDATE = (ROOT / ".github/workflows/update-data.yml").read_text(encoding="utf-8")
-DOCKER = (ROOT / ".github/workflows/docker-telegram.yml").read_text(encoding="utf-8")
+BUILD = (ROOT / ".github/workflows/build-worker.yml").read_text(encoding="utf-8")
+NATIVE_BUILD = (ROOT / "worker/scripts/build-cloudflare.sh").read_text(encoding="utf-8")
 PARSER_TESTS = (ROOT / ".github/workflows/parse-tests.yml").read_text(encoding="utf-8")
 PARSER_LIVE = (ROOT / ".github/workflows/parser-live-smoke.yml").read_text(encoding="utf-8")
 README = (ROOT / "parse/README.md").read_text(encoding="utf-8")
@@ -43,13 +44,13 @@ def acquisition_limits(event, mode, max_pages="50", max_additions="200"):
     return tuple(values)
 
 
-def docker_context_is_trusted(event, ref, workflow_ref, source_sha="", data_sha=""):
+def build_context_is_trusted(event, ref, workflow_ref, source_sha="", data_sha=""):
     if ref != DEFAULT_REF:
         return False
     direct = (
         event == "push"
-        and workflow_ref == f"{REPOSITORY}/.github/workflows/docker-telegram.yml@{ref}"
-        and source_sha == ""
+        and workflow_ref == f"{REPOSITORY}/.github/workflows/build-worker.yml@{ref}"
+        and source_sha == "" and data_sha == ""
     )
     reusable = (
         event in {"schedule", "workflow_dispatch"}
@@ -81,23 +82,22 @@ class WorkflowTrustTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(expected, update_context_is_trusted(event, ref, mode))
 
-    def test_docker_event_ref_source_matrix(self):
+    def test_build_event_ref_source_matrix(self):
         update_ref = f"{REPOSITORY}/.github/workflows/update-data.yml@{DEFAULT_REF}"
-        docker_ref = f"{REPOSITORY}/.github/workflows/docker-telegram.yml@{DEFAULT_REF}"
+        build_ref = f"{REPOSITORY}/.github/workflows/build-worker.yml@{DEFAULT_REF}"
         cases = {
-            "default push": ("push", DEFAULT_REF, docker_ref, "", "", True),
+            "default push": ("push", DEFAULT_REF, build_ref, "", "", True),
             "reusable schedule": ("schedule", DEFAULT_REF, update_ref, SOURCE_SHA, DATA_SHA, True),
             "reusable manual": ("workflow_dispatch", DEFAULT_REF, update_ref, SOURCE_SHA, DATA_SHA, True),
-            "feature reusable": ("workflow_dispatch", "refs/heads/feature/untrusted", update_ref, SOURCE_SHA, DATA_SHA, False),
-            "wrong reusable source": ("workflow_dispatch", DEFAULT_REF, update_ref, "c" * 40, DATA_SHA, False),
+            "feature manual": ("workflow_dispatch", "refs/heads/feature/untrusted", update_ref, SOURCE_SHA, DATA_SHA, False),
+            "wrong caller": ("workflow_dispatch", DEFAULT_REF, build_ref, SOURCE_SHA, DATA_SHA, False),
+            "wrong source": ("workflow_dispatch", DEFAULT_REF, update_ref, "c" * 40, DATA_SHA, False),
             "fork pull request": ("pull_request", "refs/pull/16/merge", update_ref, SOURCE_SHA, DATA_SHA, False),
         }
         for name, (event, ref, workflow_ref, source_sha, data_sha, expected) in cases.items():
             with self.subTest(name=name):
-                self.assertEqual(
-                    expected,
-                    docker_context_is_trusted(event, ref, workflow_ref, source_sha, data_sha),
-                )
+                self.assertEqual(expected, build_context_is_trusted(
+                    event, ref, workflow_ref, source_sha, data_sha))
 
     def test_manual_incremental_limit_matrix(self):
         self.assertEqual(acquisition_limits("schedule", "incremental", "999", "999"),
@@ -126,17 +126,35 @@ class WorkflowTrustTests(unittest.TestCase):
                 self.assertFalse(update_context_is_trusted(
                     "workflow_dispatch", ref, "incremental"))
 
-    def test_workflows_encode_trust_contract(self):
+    def test_workflows_encode_trust_and_credential_contract(self):
         default_ref_guard = "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
         self.assertGreaterEqual(UPDATE.count(default_ref_guard), 4)
-        self.assertGreaterEqual(DOCKER.count(default_ref_guard), 2)
-        self.assertIn("ref: ${{ inputs.source_sha || github.sha }}", DOCKER)
-        self.assertIn("inputs.source_sha == github.sha && inputs.data_sha != ''", DOCKER)
-        self.assertIn(".github/workflows/update-data.yml@{1}", DOCKER)
+        self.assertIn(default_ref_guard, BUILD)
+        self.assertIn("ref: ${{ inputs.source_sha || github.sha }}", BUILD)
+        self.assertIn("inputs.source_sha == github.sha && inputs.data_sha != ''", BUILD)
+        self.assertIn(".github/workflows/update-data.yml@{1}", BUILD)
         self.assertIn("source_sha: ${{ github.sha }}", UPDATE)
-        self.assertNotIn("secrets: inherit", UPDATE)
-        self.assertIn("DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}", UPDATE)
-        self.assertIn("DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}", UPDATE)
+        self.assertNotIn("secrets: inherit", UPDATE + BUILD)
+        self.assertNotIn("secrets:", BUILD)
+        self.assertNotIn("vars.", UPDATE + BUILD)
+        self.assertNotIn("  deploy:", BUILD)
+        self.assertNotIn("wrangler.js deploy", BUILD)
+        self.assertNotIn("secrets.", BUILD)
+        self.assertIn("cancel-in-progress: false", BUILD)
+        self.assertNotIn("BOT_TOKEN", BUILD)
+        self.assertNotIn("TELEGRAM_WEBHOOK_SECRET", BUILD)
+        self.assertIn("uses: ./.github/workflows/build-worker.yml", UPDATE)
+        self.assertNotIn("deploy-worker.yml", UPDATE + BUILD)
+        self.assertIn("package:deployment", BUILD)
+
+    def test_native_build_is_production_configured_and_never_publishes(self):
+        self.assertIn("SOURCE_SHA=$(git rev-parse HEAD)", NATIVE_BUILD)
+        self.assertIn("refs/heads/data", NATIVE_BUILD)
+        self.assertIn("--source-sha \"$SOURCE_SHA\" --data-sha \"$DATA_SHA\"", NATIVE_BUILD)
+        self.assertIn("validate-deployment.py", NATIVE_BUILD)
+        self.assertIn("npm run package:deployment", NATIVE_BUILD)
+        self.assertNotIn("wrangler deploy", NATIVE_BUILD)
+        self.assertNotIn("secrets.", NATIVE_BUILD)
 
     def test_live_smoke_trigger_isolated_from_worker_and_workflow_changes(self):
         current_stack_paths = (
