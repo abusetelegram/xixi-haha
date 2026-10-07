@@ -175,26 +175,25 @@ reviewing bounds. Full scans remain an explicit reconciliation mode with fixed
 pace. `export-only` requires an exact lowercase 40-hex commit reachable from the
 published `data` branch and retries derivative artifacts without changing data.
 Successful changed updates upload all aggregate forms plus provenance and explicitly
-call the reusable Worker build with the same newly published data SHA and exact
-default-branch source SHA. (`GITHUB_TOKEN` pushes do not start a second workflow.)
-A direct default-branch push independently resolves and pins the published `data`
-head once. Both paths build and test public Static Assets; Cloudflare deployment is
-skipped unless the repository variable `CLOUDFLARE_DEPLOY_ENABLED` is exactly
-`true`. No-change and export-only runs do not invoke this deployment path.
+call the reusable Worker **build/validation** workflow with the same newly published data
+SHA and exact default-branch source SHA. (`GITHUB_TOKEN` pushes do not start a second
+workflow.) A direct default-branch push independently resolves and pins the published
+`data` head once. Both paths build, test, dry-run package, and upload public Static Assets;
+GitHub Actions has no Worker publication job or Cloudflare deployment credentials.
+No-change and export-only runs do not invoke this Worker build path.
 
-Only the named `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` values are
-forwarded; broad secret inheritance is forbidden. They are unavailable to the
-build job and consumed only by the gated, serialized deploy job after current
-`master` and `data` still match the tested generation. The token should be scoped
-to the target account and Worker Scripts edit permission (plus the minimum Static
-Assets permission Cloudflare requires). Protect the `cloudflare-production`
-environment and restrict repository variable/secret administration.
+Production publication is owned only by the operator-managed Cloudflare native Git
+connection described in `worker/README.md`. A DATA-only update does not automatically
+trigger Cloudflare and its Actions artifact is not automatically consumed there. After a
+successful changed-data run, an operator manually requests a fresh Cloudflare build; that
+build resolves the freshest published DATA SHA at build time (or validates an explicitly
+selected reachable `DATA_SHA`). No webhook or deployment API trigger is part of this
+contract.
 
-These source-level event, default-ref, caller-path, exact-SHA, reachable-data, and
-stale-generation checks fail closed for pull requests, forks, feature refs, wrong
-callers, and superseded builds. They do not defend against an administrator who
-can rewrite workflow or repository settings; branch/environment protection is the
-required outer boundary.
+These source-level event, default-ref, caller-path, exact-SHA, and reachable-data checks
+fail closed for pull requests, forks, feature refs, wrong callers, and mismatched builds.
+They do not defend against an administrator who can rewrite workflow or repository
+settings; branch protection is the required outer boundary.
 
 ## Compatibility and completed cutover
 

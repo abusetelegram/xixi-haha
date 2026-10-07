@@ -62,14 +62,16 @@ uv run --locked python parse/corpus.py validate \
 详细路由、免费额度注意事项、部署、回滚、本地测试和 bot 人工配置见
 [`worker/README.md`](./worker/README.md)。
 
-部署默认关闭：只有默认分支的受信 workflow、精确 source/DATA SHA、完整构建测试通过，且仓库变量
-`CLOUDFLARE_DEPLOY_ENABLED` 严格等于 `true` 时才会使用命名的 Cloudflare 凭据。Telegram token、
-webhook secret 和 `setWebhook` 注册都是运维人员在 Cloudflare/Telegram 中执行的独立人工步骤；
-仓库 workflow 不注册 webhook，也不会在测试中调用真实 bot。此服务无持久去重，采用至少一次处理，
-超时或非 2xx 后 Telegram 重投可能产生重复回复，不承诺 exactly-once。
+GitHub Actions 只负责从精确、可达的 source/DATA SHA 构建、验证、测试并上传 artifact，绝不发布
+Worker。生产发布的唯一所有者是运维人员配置的 Cloudflare 原生 Git 连接；DATA-only 更新成功后仍须
+人工在 Cloudflare 中触发一次新构建，Actions artifact 不会被 Cloudflare 自动采用。具体构建命令、
+生产配置和回滚约束见 [`worker/README.md`](./worker/README.md)。Telegram token、webhook secret 和
+`setWebhook` 注册都是运维人员在 Cloudflare/Telegram 中执行的独立人工步骤；仓库 workflow 不注册
+webhook，也不会在测试中调用真实 bot。此服务无持久去重，采用至少一次处理，超时或非 2xx 后
+Telegram 重投可能产生重复回复，不承诺 exactly-once。
 
-回滚必须重新运行/提交受信默认分支版本，使代码和由同一 provenance 验证的资产一起部署；不要单独
-替换公开资产。
+回滚必须让 Cloudflare 原生 Git 构建重新构建一个已审核的 source commit，并由该构建重新解析或显式
+固定一个可达 DATA SHA，使代码和同一 provenance 的资产一起发布；不要单独替换公开资产。
 
 ## 没了？
 

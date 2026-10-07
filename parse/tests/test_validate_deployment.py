@@ -24,7 +24,7 @@ class DeploymentValidatorRootTests(unittest.TestCase):
     @staticmethod
     def _write_valid_assets(root):
         data_root = root / "_data" / DATA_SHA
-        data_root.mkdir(parents=True)
+        data_root.mkdir(parents=True, exist_ok=True)
         index_path = data_root / "paragraph-index.bin"
         shard_path = data_root / "articles-000.json"
         index_path.write_bytes(b"tiny-index")
@@ -32,8 +32,19 @@ class DeploymentValidatorRootTests(unittest.TestCase):
         manifest = {
             "sourceSha": SOURCE_SHA,
             "dataSha": DATA_SHA,
-            "paragraphIndex": {"path": str(index_path.relative_to(root))},
-            "sharding": {"shards": [{"path": str(shard_path.relative_to(root))}]},
+            "paragraphIndex": {
+                "path": str(index_path.relative_to(root)),
+                "bytes": len(index_path.read_bytes()),
+                "sha256": hashlib.sha256(index_path.read_bytes()).hexdigest(),
+            },
+            "sharding": {
+                "shardCount": 1,
+                "shards": [{
+                    "path": str(shard_path.relative_to(root)),
+                    "bytes": len(shard_path.read_bytes()),
+                    "sha256": hashlib.sha256(shard_path.read_bytes()).hexdigest(),
+                }],
+            },
         }
         manifest_path = data_root / "manifest.json"
         manifest_bytes = (json.dumps(manifest, sort_keys=True) + "\n").encode("utf-8")
@@ -69,6 +80,68 @@ class DeploymentValidatorRootTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("validated 4 public assets", result.stdout)
         self.assertEqual(self._snapshot(self.assets), before)
+
+    def test_same_length_shard_corruption_is_rejected(self):
+        shard = self.assets / "_data" / DATA_SHA / "articles-000.json"
+        shard.write_text("{}\n", encoding="utf-8")
+        result = self.validate(self.assets)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("checksum", result.stderr)
+
+    def test_same_length_index_corruption_is_rejected(self):
+        index = self.assets / "_data" / DATA_SHA / "paragraph-index.bin"
+        content = index.read_bytes()
+        index.write_bytes(bytes([content[0] ^ 1]) + content[1:])
+        result = self.validate(self.assets)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("checksum", result.stderr)
+
+    def test_declared_length_mismatch_is_rejected(self):
+        self._mutate_manifest(lambda manifest: manifest["paragraphIndex"].update(
+            bytes=manifest["paragraphIndex"]["bytes"] + 1))
+        result = self.validate(self.assets)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("size", result.stderr)
+
+    def test_missing_or_malformed_descriptor_fields_are_rejected(self):
+        mutations = (
+            lambda manifest: manifest["paragraphIndex"].pop("bytes"),
+            lambda manifest: manifest["paragraphIndex"].update(bytes=True),
+            lambda manifest: manifest["paragraphIndex"].update(bytes=-1),
+            lambda manifest: manifest["sharding"]["shards"][0].update(sha256="A" * 64),
+            lambda manifest: manifest["sharding"]["shards"][0].update(path="../escape"),
+        )
+        for mutate in mutations:
+            with self.subTest(mutation=mutate):
+                self._write_valid_assets(self.assets)
+                self._mutate_manifest(mutate)
+                self.assertNotEqual(self.validate(self.assets).returncode, 0)
+
+    def test_duplicate_descriptor_paths_are_rejected(self):
+        def duplicate(manifest):
+            manifest["sharding"]["shards"].append(dict(manifest["sharding"]["shards"][0]))
+            manifest["sharding"]["shardCount"] = 2
+        self._mutate_manifest(duplicate)
+        result = self.validate(self.assets)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("duplicate", result.stderr)
+
+    def test_shard_count_must_match_descriptors(self):
+        self._mutate_manifest(lambda manifest: manifest["sharding"].update(shardCount=2))
+        result = self.validate(self.assets)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("shardCount", result.stderr)
+
+    def _mutate_manifest(self, mutate):
+        manifest_path = self.assets / "_data" / DATA_SHA / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        mutate(manifest)
+        manifest_bytes = (json.dumps(manifest, sort_keys=True) + "\n").encode("utf-8")
+        manifest_path.write_bytes(manifest_bytes)
+        metadata_path = self.assets / "worker-data.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["manifestSha256"] = hashlib.sha256(manifest_bytes).hexdigest()
+        metadata_path.write_text(json.dumps(metadata, sort_keys=True) + "\n", encoding="utf-8")
 
     def test_root_symlink_is_rejected_without_altering_target(self):
         before = self._snapshot(self.assets)

@@ -336,7 +336,7 @@ jobs:
           retention-days: 14
 
   worker:
-    name: build and optionally deploy Worker from the same new data commit
+    name: build and validate Worker from the same new data commit
     needs:
       - update_data
       - export
@@ -346,10 +346,7 @@ jobs:
       needs.update_data.outputs.changed == 'true' && needs.export.result == 'success'
     permissions:
       contents: read
-    uses: ./.github/workflows/deploy-worker.yml
+    uses: ./.github/workflows/build-worker.yml
     with:
       source_sha: ${{ github.sha }}
       data_sha: ${{ needs.update_data.outputs.data_sha }}
-    secrets:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

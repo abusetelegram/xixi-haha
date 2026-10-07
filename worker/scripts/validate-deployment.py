@@ -8,6 +8,7 @@ import re
 import sys
 
 SHA = re.compile(r"[0-9a-f]{40}\Z")
+CONTENT_SHA = re.compile(r"[0-9a-f]{64}\Z")
 MAX_FILES = 20_000
 MAX_BYTES = 25 * 1024 * 1024
 
@@ -21,6 +22,58 @@ def load_json(path):
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         fail("invalid JSON {}: {}".format(path, exc))
+
+
+def hash_file(path):
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with path.open("rb") as content:
+            while True:
+                chunk = content.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size >= MAX_BYTES:
+                    fail("asset must be smaller than 25 MiB: {}".format(path))
+                digest.update(chunk)
+    except OSError as exc:
+        fail("cannot read declared asset {}: {}".format(path, exc))
+    return size, digest.hexdigest()
+
+
+def descriptor_path(descriptor, label, version_root, seen):
+    if not isinstance(descriptor, dict):
+        fail("{} descriptor must be an object".format(label))
+    relative = descriptor.get("path")
+    size = descriptor.get("bytes")
+    checksum = descriptor.get("sha256")
+    if not isinstance(relative, str) or not relative:
+        fail("{} descriptor path must be a nonempty string".format(label))
+    path = Path(relative)
+    if (path.is_absolute() or "\\" in relative or path.as_posix() != relative
+            or "." in path.parts or ".." in path.parts
+            or not relative.startswith(version_root + "/")):
+        fail("{} descriptor path is unsafe or not version-pinned".format(label))
+    if relative in seen:
+        fail("duplicate descriptor path: {}".format(relative))
+    seen.add(relative)
+    if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+        fail("{} descriptor bytes must be a nonnegative integer".format(label))
+    if not isinstance(checksum, str) or CONTENT_SHA.fullmatch(checksum) is None:
+        fail("{} descriptor sha256 must be lowercase 64-hex".format(label))
+    return relative, size, checksum
+
+
+def verify_descriptor(root, descriptor, label, version_root, seen):
+    relative, expected_size, expected_checksum = descriptor_path(
+        descriptor, label, version_root, seen)
+    actual_size, actual_checksum = hash_file(root / relative)
+    if actual_size != expected_size:
+        fail("{} size does not match manifest".format(label))
+    if actual_checksum != expected_checksum:
+        fail("{} checksum does not match manifest".format(label))
+    return relative
 
 
 def main(argv):
@@ -63,13 +116,26 @@ def main(argv):
     if manifest.get("sourceSha") != source_sha or manifest.get("dataSha") != data_sha:
         fail("manifest provenance does not match metadata")
 
+    version_root = "_data/{}".format(data_sha)
     declared = {"worker-data.json", expected_manifest}
-    index = manifest.get("paragraphIndex", {})
-    declared.add(index.get("path"))
-    for shard in manifest.get("sharding", {}).get("shards", []):
-        declared.add(shard.get("path"))
+    seen = set()
+    index = manifest.get("paragraphIndex")
+    declared.add(verify_descriptor(root, index, "paragraph index", version_root, seen))
+    sharding = manifest.get("sharding")
+    if not isinstance(sharding, dict):
+        fail("sharding must be an object")
+    shards = sharding.get("shards")
+    shard_count = sharding.get("shardCount")
+    if not isinstance(shards, list):
+        fail("sharding shards must be an array")
+    if (isinstance(shard_count, bool) or not isinstance(shard_count, int)
+            or shard_count < 0 or shard_count != len(shards)):
+        fail("shardCount must match the shard descriptor count")
+    for number, shard in enumerate(shards):
+        declared.add(verify_descriptor(
+            root, shard, "shard {}".format(number), version_root, seen))
     actual = {str(path.relative_to(root)) for path in files}
-    if None in declared or actual != declared:
+    if actual != declared:
         fail("asset tree does not exactly match the manifest")
     print("validated {} public assets for source={} data={}".format(len(files), source_sha, data_sha))
 
