@@ -61,6 +61,7 @@ class CloudflareNativeBuildTests(unittest.TestCase):
         tool = self.bin / "uv"
         self._write_uv(tool, "0.12.18")
         self._write_uv(self.bin / "uv-template", "0.12.18")
+        (self.bin / "python3").symlink_to(sys.executable)
         python = self.bin / "python3.13"
         python.write_text("""#!/usr/bin/env python3
 import os, pathlib, shutil, sys
@@ -141,7 +142,7 @@ raise SystemExit('unexpected uv invocation: ' + repr(args))
         bootstrap_log = self.root / "bootstrap.log"
         env = os.environ.copy()
         env.update({
-            "PATH": str(self.bin) + os.pathsep + env["PATH"],
+            "PATH": str(self.bin) + os.pathsep + os.defpath,
             "DATA_REPOSITORY_URL": str(self.data),
             "BUILD_TEST_LOG": str(log),
             "BUILD_UV_LOG": str(uv_log),
@@ -198,6 +199,27 @@ raise SystemExit('unexpected uv invocation: ' + repr(args))
         self.assertIn("xixi-haha-uv.", selected)
         self.assertTrue(all(line.startswith(selected + "\t") for line in calls))
         self.assertFalse(Path(selected).exists())
+
+    def test_parent_path_uv_does_not_leak_into_missing_uv_fixture(self):
+        (self.bin / "uv").unlink()
+        host_bin = self.root / "host bin"
+        host_bin.mkdir()
+        host_uv = host_bin / "uv"
+        self._write_uv(host_uv, "0.12.18")
+        original_path = os.environ.get("PATH")
+        os.environ["PATH"] = str(host_bin) + os.pathsep + (original_path or "")
+        try:
+            result, _, uv_log, bootstrap_log = self.run_build()
+        finally:
+            if original_path is None:
+                os.environ.pop("PATH", None)
+            else:
+                os.environ["PATH"] = original_path
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(bootstrap_log.exists())
+        calls = uv_log.read_text(encoding="utf-8").splitlines()
+        self.assertTrue(calls)
+        self.assertTrue(all(not line.startswith(str(host_uv) + "\t") for line in calls))
 
     def test_wrong_ambient_uv_bootstraps_instead_of_using_it_for_locked_commands(self):
         self._write_uv(self.bin / "uv", "0.12.17")
